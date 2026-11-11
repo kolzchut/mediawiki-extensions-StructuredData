@@ -1,0 +1,78 @@
+{
+	"name": "StructuredData",
+	"version": "0.1.0",
+	"author": [
+		"Dror S. [FFS] ([https://www.kolzchut.org.il Kol-Zchut])"
+	],
+	"url": "https://github.com/kolzchut/mediawiki-extensions-StructuredData",
+	"descriptionmsg": "structureddata-desc",
+	"license-name": "GPL-2.0-or-later",
+	"type": "other",
+	"requires": {
+		"MediaWiki": ">= 1.43.0"
+	},
+	"MessagesDirs": {
+		"StructuredData": [
+			"i18n"
+		]
+	},
+	"AutoloadNamespaces": {
+		"MediaWiki\\Extension\\StructuredData\\": "src/"
+	},
+	"TestAutoloadNamespaces": {
+		"MediaWiki\\Extension\\StructuredData\\Tests\\Unit\\": "tests/phpunit/unit/",
+		"MediaWiki\\Extension\\StructuredData\\Tests\\Integration\\": "tests/phpunit/integration/"
+	},
+	"ServiceWiringFiles": [
+		"src/ServiceWiring.php"
+	],
+	"config": {
+		"StructuredDataNamespaces": {
+			"description": "Namespaces whose pages get structured data. null means the content namespaces ($wgContentNamespaces).",
+			"value": null
+		},
+		"StructuredDataPublisherName": {
+			"description": "Name of the publishing organisation, used as the Article's publisher and author. null means $wgSitename.",
+			"value": null
+		},
+		"StructuredDataPublisherLogo": {
+			"description": "URL of the publishing organisation's logo, absolute or relative to $wgServer. Google wants a raster image of at least 112x112 pixels. null leaves the logo out.",
+			"value": null
+		},
+		"StructuredDataBreadcrumb": {
+			"description": "Whether to add a BreadcrumbList: the main page, the page's content area (from Extension:ArticleContentArea) and the page.",
+			"value": true
+		},
+		"StructuredDataBreadcrumbContentArea": {
+			"description": "Whether the BreadcrumbList includes the page's content area, linked to the category of that name. It is left out anyway when the page has none or its category page does not exist on this wiki.",
+			"value": true
+		},
+		"StructuredDataArticle": {
+			"description": "Whether to add an Article, with its publisher as an Organization.",
+			"value": true
+		},
+		"StructuredDataFAQ": {
+			"description": "Whether to add an FAQPage built from the page's {{#faq:}} questions (Extension:FAQElement). It is left out while FAQElement still emits its own, i.e. while $wgFAQElementOutputSchema is true.",
+			"value": true
+		}
+	},
+	"HookHandlers": {
+		"StructuredDataHooks": {
+			"class": "MediaWiki\\Extension\\StructuredData\\Hooks",
+			"services": [
+				"MainConfig",
+				"NamespaceInfo",
+				"RevisionLookup",
+				"PageStore",
+				"TitleFactory",
+				"UrlUtils",
+				"StructuredData.LastHumanEditLookup"
+			]
+		}
+	},
+	"Hooks": {
+		"OutputPageParserOutput": "StructuredDataHooks",
+		"BeforePageDisplay": "StructuredDataHooks"
+	},
+	"manifest_version": 2
+}

@@ -1,0 +1,8 @@
+{
+	"@metadata": {
+		"authors": [
+			"Dror S."
+		]
+	},
+	"structureddata-desc": "Adds schema.org structured data (JSON-LD) to content pages: a breadcrumb trail, an article with its dates and publisher, and the page's questions and answers"
+}
