@@ -58,7 +58,8 @@ class Hooks implements
 		private readonly TitleFactory $titleFactory,
 		private readonly UrlUtils $urlUtils,
 		private readonly LastHumanEditLookup $lastHumanEditLookup,
-		private readonly PageFacts $pageFacts
+		private readonly PageFacts $pageFacts,
+		private readonly string $entryPoint = MW_ENTRY_POINT
 	) {
 	}
 
@@ -96,8 +97,9 @@ class Hooks implements
 	 * <head>, which it does after the page body and after every
 	 * BeforePageDisplay handler. So the <h1> read here is the final one, whatever
 	 * the order in which extensions that change it are loaded. Only a skinned
-	 * HTML page writes a <head>: the API (but for action=parse's headhtml,
-	 * which isEligible() turns away), action=raw and other outputs never run it.
+	 * HTML page writes a <head>, so action=raw and most of the API never run
+	 * it. The exception, action=parse with prop=headhtml, is turned away by
+	 * isEligible().
 	 *
 	 * @inheritDoc
 	 */
@@ -120,8 +122,17 @@ class Hooks implements
 	 * our namespaces describes that page. Special pages, redirects, old
 	 * revisions, diffs, edit/history/info and missing pages get nothing, and so
 	 * does the main page, which is the site rather than an article.
+	 *
+	 * Nor does the API. action=parse with prop=headhtml writes a <head> for an
+	 * OutputPage that it makes look like a plain view (action=view, article
+	 * flag set), but it runs no BeforePageDisplay, so the <h1> there is not
+	 * the reader's (on teen it keeps the namespace that KolzchutYoung drops).
+	 * Its request is a FauxRequest, so the entry point is what tells it apart.
 	 */
 	public function isEligible( OutputPage $out ): bool {
+		if ( $this->entryPoint === 'api' ) {
+			return false;
+		}
 		$title = $out->getTitle();
 		if ( !$title
 			|| !$title->canExist()

@@ -2,6 +2,7 @@
 
 namespace MediaWiki\Extension\StructuredData\Tests\Integration;
 
+use MediaWiki\Api\ApiMain;
 use MediaWiki\Content\WikitextContent;
 use MediaWiki\Context\RequestContext;
 use MediaWiki\Extension\StructuredData\Hooks;
@@ -69,7 +70,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		parent::tearDown();
 	}
 
-	private function newHooks( bool $realLastUpdate = false ): Hooks {
+	private function newHooks( bool $realLastUpdate = false, string $entryPoint = 'index' ): Hooks {
 		$services = $this->getServiceContainer();
 		return new Hooks(
 			$services->getMainConfig(),
@@ -85,7 +86,8 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 				$services->getConnectionProvider(),
 				$services->getRepoGroup(),
 				$services->getUrlUtils()
-			)
+			),
+			$entryPoint
 		);
 	}
 
@@ -709,6 +711,40 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$title = $this->makePage( 'SD requests ' . md5( serialize( $query ) ) );
 
 		$this->assertNull( $this->render( $this->newHooks(), $this->newView( $title, $query ) ) );
+	}
+
+	/**
+	 * The <head> that api.php?action=parse&prop=headhtml writes for the page,
+	 * with this extension's handlers as $hooks.
+	 */
+	private function apiHeadHtml( Hooks $hooks, Title $title ): string {
+		$ownHooks = [ 'ContentAlterParserOutput', 'OutputPageParserOutput', 'OutputPageAfterGetHeadLinksArray' ];
+		foreach ( $ownHooks as $hook ) {
+			$this->setTemporaryHook( $hook, [ $hooks, "on$hook" ] );
+		}
+		$context = new RequestContext();
+		$context->setRequest( new FauxRequest( [
+			'action' => 'parse',
+			'page' => $title->getPrefixedText(),
+			'prop' => 'headhtml',
+			'formatversion' => 2,
+		] ) );
+		$context->setUser( $this->getServiceContainer()->getUserFactory()->newAnonymous() );
+		$api = new ApiMain( $context );
+		$api->execute();
+		return $api->getResult()->getResultData( [ 'parse', 'headhtml' ] );
+	}
+
+	public function testNothingForTheApi() {
+		$title = $this->makePage( 'SD api' );
+
+		// action=parse&prop=headhtml makes its OutputPage look like a plain
+		// view, so it would carry the JSON-LD from anywhere but the API.
+		$this->assertStringContainsString( '<script type="application/ld+json">',
+			$this->apiHeadHtml( $this->newHooks(), $title ), 'outside api.php' );
+
+		$this->assertStringNotContainsString( 'application/ld+json',
+			$this->apiHeadHtml( $this->newHooks( false, 'api' ), $title ), 'api.php' );
 	}
 
 	public function testNotAnArticleView() {
