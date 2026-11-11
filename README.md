@@ -103,8 +103,12 @@ to the category of that name, which is `noindex,nofollow`.
 
 ### Article
 
-- `headline`: the displayed title as plain text, without the " (type)" suffix
-  that WRArticleType adds to it.
+- `headline`: the page's `<h1>` as plain text (a `{{DISPLAYTITLE}}` included),
+  without the " (type)" suffix that WRArticleType adds to it. The last crumb of
+  the BreadcrumbList carries the same name. Where an extension changes the
+  `<h1>` in its own `BeforePageDisplay` handler, as KolzchutYoung drops the
+  namespace prefix from teen's articles and portals, the headline follows only
+  if StructuredData is loaded after that extension.
 - `datePublished`: the page's first revision.
 - `dateModified`: the last edit by a human, as
   [RealLastUpdate](https://github.com/kolzchut/mediawiki-extensions-RealLastUpdate)

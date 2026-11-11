@@ -8,7 +8,9 @@ use MediaWiki\Extension\StructuredData\Hooks;
 use MediaWiki\Extension\StructuredData\LastHumanEditLookup;
 use MediaWiki\Extension\StructuredData\PageFacts;
 use MediaWiki\Language\LanguageCode;
+use MediaWiki\MainConfigNames;
 use MediaWiki\Output\OutputPage;
+use MediaWiki\Parser\Parser;
 use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Registration\ExtensionRegistry;
 use MediaWiki\Request\FauxRequest;
@@ -125,7 +127,8 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	}
 
 	/**
-	 * An OutputPage as Article::view() leaves it for a plain view.
+	 * An OutputPage as Article::view() leaves it for a plain view, with the
+	 * <h1> it sets before it has the parse: the prefixed title.
 	 */
 	private function newView( Title $title, array $query = [], ?int $revId = null ): OutputPage {
 		$context = new RequestContext();
@@ -133,10 +136,35 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$context->setRequest( new FauxRequest( $query ) );
 		$context->setUser( $this->getServiceContainer()->getUserFactory()->newAnonymous() );
 		$out = $context->getOutput();
+		$out->setPageTitle( Parser::formatPageTitle(
+			str_replace( '_', ' ', $title->getNsText() ), ':', $title->getText()
+		) );
 		$out->setArticleFlag( true );
 		$out->setRevisionId( $revId ?? $title->getLatestRevID() );
 		$out->setRevisionTimestamp( self::EDITED );
 		return $out;
+	}
+
+	/**
+	 * Set the title the parse displays on both the <h1> and the display title,
+	 * as Article::adjustDisplayTitle() does (and WRArticleType after it).
+	 */
+	private static function showTitle( OutputPage $out, string $html ): void {
+		$out->setPageTitle( $html );
+		$out->setDisplayTitle( $html );
+	}
+
+	/**
+	 * A real parse of the page as stored, with the facts collected during it,
+	 * as the parser cache holds it.
+	 */
+	private function realParse( Hooks $hooks, Title $title ): ParserOutput {
+		$page = $this->getServiceContainer()->getWikiPageFactory()->newFromTitle( $title );
+		$parserOutput = $this->getServiceContainer()->getParserOutputAccess()->getParserOutput(
+			$page, $page->makeParserOptions( 'canonical' )
+		)->getValue();
+		$hooks->onContentAlterParserOutput( new WikitextContent( 'x' ), $title, $parserOutput );
+		return $parserOutput;
 	}
 
 	/**
@@ -516,7 +544,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	public function testHeadlineIsTheDisplayTitleAsText() {
 		$title = $this->makePage( 'SD title' );
 		$out = $this->newView( $title );
-		$out->setDisplayTitle( '<i>Shown</i> &amp; title' );
+		self::showTitle( $out, '<i>Shown</i> &amp; title' );
 
 		$nodes = self::byType( $this->render( $this->newHooks(), $out ) );
 
@@ -528,12 +556,65 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$title = $this->makePage( 'SD typed' );
 		$out = $this->newView( $title );
 		// What WRArticleType makes of the display title
-		$out->setDisplayTitle( '<span class="mw-page-title-main">Typed</span>'
+		self::showTitle( $out, '<span class="mw-page-title-main">Typed</span>'
 			. '<span class="article-type"> (rights)</span>' );
 
 		$nodes = self::byType( $this->render( $this->newHooks(), $out ) );
 
 		$this->assertSame( 'Typed', $nodes['Article']['headline'] );
+	}
+
+	/**
+	 * A content namespace other than the main one, as teen's articles and
+	 * portals live in.
+	 */
+	private function useRightsNamespace(): int {
+		$this->overrideConfigValues( [
+			MainConfigNames::ExtraNamespaces => [ 100 => 'Right', 101 => 'Right_talk' ],
+			MainConfigNames::ContentNamespaces => [ NS_MAIN, 100 ],
+			MainConfigNames::RestrictDisplayTitle => false,
+		] );
+		return 100;
+	}
+
+	public function testHeadlineInAnotherContentNamespaceFollowsTheHeading() {
+		$title = $this->makePage( 'SD prefixed', $this->useRightsNamespace() );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		// As core leaves it, the <h1> carries the namespace, and so does the headline.
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+		$this->assertSame( 'Right:SD prefixed', $nodes['Article']['headline'] );
+
+		// Teen's KolzchutYoung drops the namespace from the <h1> alone, in its
+		// BeforePageDisplay handler, which runs before this extension's.
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+		$out->setPageTitle( $title->getText() );
+
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+		$this->assertSame( 'SD prefixed', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'SD prefixed', end( $crumbs )['name'] );
+	}
+
+	public function testHeadlineIsTheDisplayTitleWhereItDiffersFromTheTitle() {
+		$title = $this->makePage( 'SD display', $this->useRightsNamespace() );
+		ConvertibleTimestamp::setFakeTime( self::EDITED );
+		$this->editPage( $title, '{{DISPLAYTITLE:Shown <i>name</i>}} Text' );
+		ConvertibleTimestamp::setFakeTime( false );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+
+		$this->assertSame( 'Shown name', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'Shown name', end( $crumbs )['name'] );
 	}
 
 	public function testConfiguredNamespaces() {

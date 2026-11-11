@@ -238,13 +238,24 @@ class Hooks implements
 	}
 
 	/**
-	 * The displayed title (DISPLAYTITLE included) as plain text, without the
-	 * " (type)" suffix that Extension:WRArticleType appends to it: that is a
-	 * label for readers, not part of the article's name.
+	 * The page's <h1> as plain text, without the " (type)" suffix that
+	 * Extension:WRArticleType appends to it: that is a label for readers, not
+	 * part of the article's name.
+	 *
+	 * The <h1> is the OutputPage's page title, not its display title. Core
+	 * sets both from the parse (DISPLAYTITLE included), but an extension may
+	 * change the <h1> alone: on the teen site, KolzchutYoung drops the
+	 * namespace prefix of its article and portal namespaces from it, while the
+	 * display title keeps the prefix. It does so in its own BeforePageDisplay
+	 * handler, so this extension must be loaded after KolzchutYoung to see it.
+	 * Without a page title, the display title stands in.
 	 */
 	private function getHeadline( OutputPage $out, Title $title ): string {
+		$pageTitle = $out->getPageTitle();
 		$html = preg_replace(
-			'#<span class="article-type">.*?</span>#s', '', $out->getDisplayTitle()
+			'#<span class="article-type">.*?</span>#s',
+			'',
+			$pageTitle !== '' ? $pageTitle : $out->getDisplayTitle()
 		) ?? '';
 		$headline = trim( Sanitizer::stripAllTags( $html ) );
 		return $headline !== '' ? $headline : $title->getPrefixedText();
