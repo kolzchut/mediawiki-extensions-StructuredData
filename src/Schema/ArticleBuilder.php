@@ -26,6 +26,7 @@ class ArticleBuilder {
 	 * @param string|null $modified Timestamp of the page's last edit, likewise
 	 * @param string|null $publisherId @id of the publishing Organization, which
 	 *  is also given as the author
+	 * @param string|null $image Absolute URL of the page's image, or null for none
 	 * @return array
 	 */
 	public static function build(
@@ -35,7 +36,8 @@ class ArticleBuilder {
 		string $inLanguage,
 		?string $published,
 		?string $modified,
-		?string $publisherId
+		?string $publisherId,
+		?string $image = null
 	): array {
 		$node = [
 			'@type' => 'Article',
@@ -57,6 +59,9 @@ class ArticleBuilder {
 				$modified = $published;
 			}
 			$node['dateModified'] = $modified;
+		}
+		if ( $image !== null && $image !== '' ) {
+			$node['image'] = $image;
 		}
 		if ( $publisherId !== null ) {
 			$node['publisher'] = [ '@id' => $publisherId ];

@@ -44,6 +44,14 @@ class ArticleBuilderTest extends MediaWikiUnitTestCase {
 		$this->assertArrayNotHasKey( 'author', $node );
 	}
 
+	public function testImage() {
+		$node = ArticleBuilder::build( 'id', 'H', 'u', 'he', null, null, null, 'https://example.org/a.png' );
+		$this->assertSame( 'https://example.org/a.png', $node['image'] );
+
+		$this->assertArrayNotHasKey( 'image', ArticleBuilder::build( 'id', 'H', 'u', 'he', null, null, null, null ) );
+		$this->assertArrayNotHasKey( 'image', ArticleBuilder::build( 'id', 'H', 'u', 'he', null, null, null, '' ) );
+	}
+
 	public function testModifiedNeverPrecedesPublished() {
 		$node = ArticleBuilder::build( 'id', 'H', 'u', 'he', '20200101000000', '20190101000000', null );
 

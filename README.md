@@ -28,7 +28,7 @@ once and the Article points at it as both publisher and author.
       "@id": "https://www.kolzchut.org.il/he/Page#breadcrumb",
       "itemListElement": [
         { "@type": "ListItem", "position": 1, "name": "עמוד ראשי", "item": "https://www.kolzchut.org.il/he/עמוד_ראשי" },
-        { "@type": "ListItem", "position": 2, "name": "חינוך", "item": "https://www.kolzchut.org.il/he/קטגוריה:חינוך" },
+        { "@type": "ListItem", "position": 2, "name": "חינוך", "item": "https://www.kolzchut.org.il/he/חינוך" },
         { "@type": "ListItem", "position": 3, "name": "Page", "item": "https://www.kolzchut.org.il/he/Page" }
       ]
     },
@@ -48,6 +48,7 @@ once and the Article points at it as both publisher and author.
       "inLanguage": "he",
       "datePublished": "2012-03-04T05:06:07Z",
       "dateModified": "2026-11-11T09:30:00Z",
+      "image": "https://www.kolzchut.org.il/w/he/images/a/ab/Example.png",
       "publisher": { "@id": "https://www.kolzchut.org.il/he/עמוד_ראשי#organization" },
       "author": { "@id": "https://www.kolzchut.org.il/he/עמוד_ראשי#organization" }
     },
@@ -72,11 +73,23 @@ once and the Article points at it as both publisher and author.
 ### BreadcrumbList
 
 The main page (named by the `mainpage-description` message in the wiki's
-language), the page's content area, and the page. The content area is what
+language), the portal of the page's content area, and the page.
+
 [ArticleContentArea](https://github.com/kolzchut/mediawiki-extensions-ArticleContentArea)
-recorded for the page, linked to the category of the same name. It is left out
-when the page has no content area, when it is `unknown`, or when that category
-page does not exist on this wiki.
+stores a page's content area by its name in one language on every wiki: on
+Kol-Zchut, Hebrew, so an Arabic article's area reads `תעסוקה וזכויות עובדים`.
+Set that language in `$wgStructuredDataContentAreaLanguage`. The middle crumb is
+then:
+
+- on the wiki in that language, the article of the area's name, or the article
+  it redirects to (the area's portal, e.g. `חינוך`);
+- on any other wiki, the article whose interlanguage link points at that
+  portal, so the crumb carries the portal's name in the page's language
+  (`التشغيل وحقوق العاملين` on ar, `Образование` on ru).
+
+Where there is no such article the middle crumb is left out, and the trail is
+main page › page. It never names the area in another language, and never links
+to the category of that name, which is `noindex,nofollow`.
 
 ### Article
 
@@ -87,7 +100,10 @@ page does not exist on this wiki.
   [RealLastUpdate](https://github.com/kolzchut/mediawiki-extensions-RealLastUpdate)
   records it, so that bot edits do not make a page look updated. When
   RealLastUpdate knows of no human edit, `dateModified` is left out. Without
-  RealLastUpdate, it is the page's latest revision.
+  RealLastUpdate, it is the revision being shown, which is the latest.
+- `image`: the page image that [PageImages](https://www.mediawiki.org/wiki/Extension:PageImages)
+  chose (a freely licensed one first), else `$wgStructuredDataDefaultImage`,
+  else none.
 - `publisher` and `author`: the Organization, named by
   `$wgStructuredDataPublisherName`.
 
@@ -102,7 +118,36 @@ parser output's extension data under `faqelement_items`, as
 
 While a FAQElement that still emits its own FAQPage is loaded, with
 `$wgFAQElementOutputSchema` true, this extension does not add one, so that a
-page never carries two.
+page never carries two. The text is plain: tags are stripped and HTML entities
+decoded.
+
+### Deploy order
+
+**Load StructuredData on a site no later than the FAQElement 2.0.0 pointer bump
+(PR kolzchut/mediawiki-extensions-FAQElement#2).** FAQElement 2.0.0 no longer
+emits a FAQPage. On a site that has it but not StructuredData, no page carries
+an FAQPage at all. Load StructuredData first, or in the same release. Loading
+it earlier is safe: until the bump it leaves the FAQPage to the older
+FAQElement, so a page never has two.
+
+## Cost per page view: no queries
+
+Everything that takes a database query is found out when the page is parsed,
+in `ContentAlterParserOutput`, and stored in the ParserOutput's extension data,
+so it is parser-cached with the page: the first revision's timestamp, the
+content area's portal, and the page image's URL. Every edit, purge or template
+change that re-parses the page collects them again.
+
+The last human edit is not queried either. RealLastUpdate already looks it up
+on every view, in its own `OutputPageParserOutput` handler, and leaves it in
+the ParserOutput's `RealLastUpdateTimestamp` page property. This extension
+reads that property in `BeforePageDisplay`, after every
+`OutputPageParserOutput` handler has run, so the order in which the two
+extensions are loaded does not matter.
+
+A page that was parsed before this extension was loaded has none of these
+facts and gets no JSON-LD until it is next parsed; no query fills the gap. The
+parser cache expires within `$wgParserCacheExpireTime` (a day on Kol-Zchut).
 
 ## Where it emits nothing
 
@@ -114,9 +159,9 @@ an article.
 
 ## Dependencies
 
-ArticleContentArea, RealLastUpdate and FAQElement are all optional. The
-extension reads what they leave behind (an OutputPage property, RealLastUpdate's
-lookup, parser output extension data) and does without when one is not loaded.
+ArticleContentArea, RealLastUpdate, FAQElement and PageImages are all optional.
+The extension reads what they leave in the ParserOutput (page properties and
+extension data) and does without when one is not loaded.
 That keeps it loadable on a wiki that has none of them, such as the teen site.
 
 ## Configuration
@@ -127,7 +172,9 @@ That keeps it loadable on a wiki that has none of them, such as the teen site.
 | `$wgStructuredDataPublisherName` | `null` | Name of the publishing organisation. `null` means `$wgSitename`. |
 | `$wgStructuredDataPublisherLogo` | `null` | URL of its logo, absolute or relative to `$wgServer`. Google wants a raster image of at least 112x112 pixels. `null` leaves the logo out. |
 | `$wgStructuredDataBreadcrumb` | `true` | Add the BreadcrumbList. |
-| `$wgStructuredDataBreadcrumbContentArea` | `true` | Include the content area in the BreadcrumbList. |
+| `$wgStructuredDataBreadcrumbContentArea` | `true` | Include the content area's portal in the BreadcrumbList. |
+| `$wgStructuredDataContentAreaLanguage` | `null` | Language code of the content-area names ArticleContentArea stores. `null` means this wiki's content language. |
+| `$wgStructuredDataDefaultImage` | `null` | Image URL for an Article whose page has no page image, absolute or relative to `$wgServer`. Google wants at least 50,000 pixels (width x height). |
 | `$wgStructuredDataArticle` | `true` | Add the Article and its Organization. |
 | `$wgStructuredDataFAQ` | `true` | Add the FAQPage. |
 

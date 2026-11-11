@@ -44,8 +44,16 @@
 			"value": true
 		},
 		"StructuredDataBreadcrumbContentArea": {
-			"description": "Whether the BreadcrumbList includes the page's content area, linked to the category of that name. It is left out anyway when the page has none or its category page does not exist on this wiki.",
+			"description": "Whether the BreadcrumbList includes the page's content area, as a link to that content area's portal article on this wiki (see $wgStructuredDataContentAreaLanguage). It is left out when the page has no content area or this wiki has no such portal.",
 			"value": true
+		},
+		"StructuredDataContentAreaLanguage": {
+			"description": "Language code of the content-area names that Extension:ArticleContentArea stores (on Kol-Zchut, Hebrew on every wiki). On a wiki in this language a content area's portal is the article of that name; on another wiki, the article with an interlanguage link to it. null means this wiki's content language.",
+			"value": null
+		},
+		"StructuredDataDefaultImage": {
+			"description": "URL of an image for an Article whose page has no page image (Extension:PageImages), absolute or relative to $wgServer. Google wants at least 50,000 pixels (width x height). null leaves such an Article without an image.",
+			"value": null
 		},
 		"StructuredDataArticle": {
 			"description": "Whether to add an Article, with its publisher as an Organization.",
@@ -62,15 +70,15 @@
 			"services": [
 				"MainConfig",
 				"NamespaceInfo",
-				"RevisionLookup",
-				"PageStore",
 				"TitleFactory",
 				"UrlUtils",
-				"StructuredData.LastHumanEditLookup"
+				"StructuredData.LastHumanEditLookup",
+				"StructuredData.PageFacts"
 			]
 		}
 	},
 	"Hooks": {
+		"ContentAlterParserOutput": "StructuredDataHooks",
 		"OutputPageParserOutput": "StructuredDataHooks",
 		"BeforePageDisplay": "StructuredDataHooks"
 	},

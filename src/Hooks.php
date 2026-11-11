@@ -4,11 +4,16 @@
  *
  * Adds schema.org JSON-LD to content pages: a BreadcrumbList, an Article with
  * its publisher, and an FAQPage when the page has questions and answers.
+ *
+ * Everything that needs a database query is found out when the page is parsed
+ * (PageFacts) and travels in the parser-cached ParserOutput, so that a page
+ * view adds no query.
  */
 
 namespace MediaWiki\Extension\StructuredData;
 
 use MediaWiki\Config\Config;
+use MediaWiki\Content\Hook\ContentAlterParserOutputHook;
 use MediaWiki\Extension\StructuredData\Schema\ArticleBuilder;
 use MediaWiki\Extension\StructuredData\Schema\BreadcrumbListBuilder;
 use MediaWiki\Extension\StructuredData\Schema\FaqPageBuilder;
@@ -18,15 +23,15 @@ use MediaWiki\MainConfigNames;
 use MediaWiki\Output\Hook\BeforePageDisplayHook;
 use MediaWiki\Output\Hook\OutputPageParserOutputHook;
 use MediaWiki\Output\OutputPage;
-use MediaWiki\Page\PageStore;
+use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Parser\Sanitizer;
-use MediaWiki\Revision\RevisionLookup;
 use MediaWiki\Title\NamespaceInfo;
 use MediaWiki\Title\Title;
 use MediaWiki\Title\TitleFactory;
 use MediaWiki\Utils\UrlUtils;
 
 class Hooks implements
+	ContentAlterParserOutputHook,
 	OutputPageParserOutputHook,
 	BeforePageDisplayHook
 {
@@ -40,36 +45,46 @@ class Hooks implements
 	/** Key of the <head> item that holds the JSON-LD */
 	public const HEAD_ITEM = 'structureddata-jsonld';
 
-	/** OutputPage property that carries the questions from the parser output */
-	private const FAQ_PROPERTY = 'StructuredDataFAQ';
-
-	/** OutputPage property that Extension:ArticleContentArea sets */
-	private const CONTENT_AREA_PROPERTY = 'ArticleContentArea';
-
-	/** The value ArticleContentArea stores for a content area it does not know */
-	private const UNKNOWN_CONTENT_AREA = 'unknown';
+	/**
+	 * OutputPage property that carries the page's ParserOutput from
+	 * OutputPageParserOutput to BeforePageDisplay, which has no access to it
+	 */
+	private const PARSER_OUTPUT_PROPERTY = 'StructuredDataParserOutput';
 
 	public function __construct(
 		private readonly Config $config,
 		private readonly NamespaceInfo $namespaceInfo,
-		private readonly RevisionLookup $revisionLookup,
-		private readonly PageStore $pageStore,
 		private readonly TitleFactory $titleFactory,
 		private readonly UrlUtils $urlUtils,
-		private readonly LastHumanEditLookup $lastHumanEditLookup
+		private readonly LastHumanEditLookup $lastHumanEditLookup,
+		private readonly PageFacts $pageFacts
 	) {
 	}
 
 	/**
-	 * Carry FAQElement's questions from the (possibly cached) parser output to
-	 * BeforePageDisplay, which has no access to the parser output.
+	 * Collect the page's facts at parse time, so they are parser-cached.
+	 *
+	 * @inheritDoc
+	 */
+	public function onContentAlterParserOutput( $content, $title, $parserOutput ) {
+		if ( !$title->canExist() || !$this->isStructuredNamespace( $title->getNamespace() ) ) {
+			return;
+		}
+		$parserOutput->setExtensionData( PageFacts::DATA_KEY, $this->pageFacts->collect( $title, $parserOutput ) );
+	}
+
+	/**
+	 * Keep the page's ParserOutput for BeforePageDisplay. It is read there, not
+	 * here, because RealLastUpdate fills in the last human edit in its own
+	 * handler of this hook, which may run after this one.
 	 *
 	 * @inheritDoc
 	 */
 	public function onOutputPageParserOutput( $out, $parserOutput ): void {
-		$items = $parserOutput->getExtensionData( self::FAQ_DATA_KEY );
-		if ( is_array( $items ) && $items ) {
-			$out->setProperty( self::FAQ_PROPERTY, $items );
+		if ( $parserOutput->getExtensionData( PageFacts::DATA_KEY ) !== null
+			|| $parserOutput->getExtensionData( self::FAQ_DATA_KEY )
+		) {
+			$out->setProperty( self::PARSER_OUTPUT_PROPERTY, $parserOutput );
 		}
 	}
 
@@ -80,7 +95,11 @@ class Hooks implements
 		if ( !$this->isEligible( $out ) ) {
 			return;
 		}
-		$script = JsonLd::toScript( $this->buildNodes( $out, $out->getTitle() ) );
+		$parserOutput = $out->getProperty( self::PARSER_OUTPUT_PROPERTY );
+		if ( !$parserOutput instanceof ParserOutput ) {
+			return;
+		}
+		$script = JsonLd::toScript( $this->buildNodes( $out, $out->getTitle(), $parserOutput ) );
 		if ( $script !== null ) {
 			$out->addHeadItem( self::HEAD_ITEM, $script );
 		}
@@ -116,17 +135,21 @@ class Hooks implements
 	/**
 	 * @param OutputPage $out
 	 * @param Title $title
+	 * @param ParserOutput $parserOutput
 	 * @return array[] schema.org nodes for the page's @graph
 	 */
-	public function buildNodes( OutputPage $out, Title $title ): array {
+	public function buildNodes( OutputPage $out, Title $title, ParserOutput $parserOutput ): array {
+		$facts = $parserOutput->getExtensionData( PageFacts::DATA_KEY );
+		$facts = is_array( $facts ) ? $facts : [];
 		$url = $title->getCanonicalURL();
 		$headline = $this->getHeadline( $out, $title );
+		$homeUrl = $this->titleFactory->newMainPage()->getCanonicalURL();
 		$nodes = [];
 
 		if ( $this->config->get( 'StructuredDataBreadcrumb' ) ) {
 			$breadcrumb = BreadcrumbListBuilder::build(
 				$url . '#breadcrumb',
-				$this->getCrumbs( $out, $url, $headline )
+				$this->getCrumbs( $out, $homeUrl, $facts['contentArea'] ?? null, $url, $headline )
 			);
 			if ( $breadcrumb !== null ) {
 				$nodes[] = $breadcrumb;
@@ -134,27 +157,27 @@ class Hooks implements
 		}
 
 		if ( $this->config->get( 'StructuredDataArticle' ) ) {
-			$homeUrl = $this->titleFactory->newMainPage()->getCanonicalURL();
 			$organizationId = $homeUrl . '#organization';
 			$nodes[] = OrganizationBuilder::build(
 				$organizationId,
 				$this->getPublisherName(),
 				$homeUrl,
-				$this->getPublisherLogo()
+				$this->expandConfigUrl( 'StructuredDataPublisherLogo' )
 			);
 			$nodes[] = ArticleBuilder::build(
 				$url . '#article',
 				$headline,
 				$url,
 				LanguageCode::bcp47( $title->getPageLanguage()->getCode() ),
-				$this->revisionLookup->getFirstRevision( $title )?->getTimestamp(),
-				$this->getModifiedTimestamp( $out, $title ),
-				$organizationId
+				$facts['firstRevision'] ?? null,
+				$this->getModifiedTimestamp( $out, $parserOutput ),
+				$organizationId,
+				$facts['image'] ?? $this->expandConfigUrl( 'StructuredDataDefaultImage' )
 			);
 		}
 
 		if ( $this->shouldEmitFaq() ) {
-			$items = $out->getProperty( self::FAQ_PROPERTY );
+			$items = $parserOutput->getExtensionData( self::FAQ_DATA_KEY );
 			if ( is_array( $items ) ) {
 				$faq = FaqPageBuilder::build( $url . '#faq', $url, $items );
 				if ( $faq !== null ) {
@@ -167,32 +190,33 @@ class Hooks implements
 	}
 
 	/**
-	 * Home › content area › page. The content area is left out when the page
-	 * has none, or when no category page of that name exists on this wiki.
+	 * Home › content area › page. The content area's page was found at parse
+	 * time (PageFacts); without one there is no middle crumb.
 	 *
 	 * @param OutputPage $out
+	 * @param string $homeUrl
+	 * @param array|null $contentArea [ 'namespace' => int, 'title' => DB key ]
 	 * @param string $url
 	 * @param string $headline
 	 * @return array[]
 	 */
-	private function getCrumbs( OutputPage $out, string $url, string $headline ): array {
+	private function getCrumbs(
+		OutputPage $out, string $homeUrl, ?array $contentArea, string $url, string $headline
+	): array {
 		$crumbs = [ [
 			'name' => $out->msg( 'mainpage-description' )->inContentLanguage()->text(),
-			'url' => $this->titleFactory->newMainPage()->getCanonicalURL(),
+			'url' => $homeUrl,
 		] ];
 
-		$area = $out->getProperty( self::CONTENT_AREA_PROPERTY );
 		if ( $this->config->get( 'StructuredDataBreadcrumbContentArea' )
-			&& is_string( $area )
-			&& trim( $area ) !== ''
-			&& $area !== self::UNKNOWN_CONTENT_AREA
+			&& isset( $contentArea['namespace'] )
+			&& isset( $contentArea['title'] )
 		) {
-			$category = $this->pageStore->getExistingPageByText( trim( $area ), NS_CATEGORY );
-			if ( $category !== null ) {
-				$crumbs[] = [
-					'name' => trim( $area ),
-					'url' => $this->titleFactory->newFromPageIdentity( $category )->getCanonicalURL(),
-				];
+			$areaTitle = $this->titleFactory->makeTitleSafe(
+				(int)$contentArea['namespace'], (string)$contentArea['title']
+			);
+			if ( $areaTitle ) {
+				$crumbs[] = [ 'name' => $areaTitle->getText(), 'url' => $areaTitle->getCanonicalURL() ];
 			}
 		}
 
@@ -205,15 +229,12 @@ class Hooks implements
 	 * record, nothing, so that a bot edit is never presented as an update.
 	 * Without RealLastUpdate, the revision being shown, which is the latest.
 	 */
-	private function getModifiedTimestamp( OutputPage $out, Title $title ): ?string {
+	private function getModifiedTimestamp( OutputPage $out, ParserOutput $parserOutput ): ?string {
 		if ( $this->lastHumanEditLookup->isAvailable() ) {
-			return $this->lastHumanEditLookup->getTimestamp( $title->getArticleID() );
+			return $this->lastHumanEditLookup->getTimestamp( $parserOutput );
 		}
-		$timestamp = $out->getRevisionTimestamp();
-		if ( $timestamp ) {
-			return $timestamp;
-		}
-		return $this->revisionLookup->getRevisionByTitle( $title )?->getTimestamp();
+		$timestamp = $out->getRevisionTimestamp() ?: $parserOutput->getRevisionTimestamp();
+		return $timestamp ?: null;
 	}
 
 	/**
@@ -236,12 +257,12 @@ class Hooks implements
 			: (string)$this->config->get( MainConfigNames::Sitename );
 	}
 
-	private function getPublisherLogo(): ?string {
-		$logo = $this->config->get( 'StructuredDataPublisherLogo' );
-		if ( !is_string( $logo ) || $logo === '' ) {
+	private function expandConfigUrl( string $name ): ?string {
+		$value = $this->config->get( $name );
+		if ( !is_string( $value ) || $value === '' ) {
 			return null;
 		}
-		return $this->urlUtils->expand( $logo, PROTO_CANONICAL );
+		return $this->urlUtils->expand( $value, PROTO_CANONICAL );
 	}
 
 	/**

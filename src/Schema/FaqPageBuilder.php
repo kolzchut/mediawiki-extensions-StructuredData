@@ -54,16 +54,19 @@ class FaqPageBuilder {
 	}
 
 	/**
-	 * FAQElement already stores plain text; this keeps the same shape for any
-	 * markup that slips through (tags removed, whitespace collapsed).
+	 * FAQElement stores the parsed HTML with its tags stripped, so the text can
+	 * still hold entities (&quot;, &amp;, &#160;) that would otherwise reach
+	 * the JSON literally. Tags are removed, entities decoded, and whitespace,
+	 * no-break spaces included, collapsed.
 	 *
 	 * @param mixed $value
 	 * @return string
 	 */
-	private static function plain( $value ): string {
+	public static function plain( $value ): string {
 		if ( !is_string( $value ) ) {
 			return '';
 		}
-		return trim( preg_replace( '/\s+/u', ' ', strip_tags( $value ) ) ?? '' );
+		$text = html_entity_decode( strip_tags( $value ), ENT_QUOTES | ENT_HTML5, 'UTF-8' );
+		return trim( preg_replace( '/[\s\x{00A0}\x{202F}]+/u', ' ', $text ) ?? '' );
 	}
 }

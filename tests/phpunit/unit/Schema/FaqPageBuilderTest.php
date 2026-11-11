@@ -44,6 +44,27 @@ class FaqPageBuilderTest extends MediaWikiUnitTestCase {
 		$this->assertSame( 'Line one two', $node['mainEntity'][0]['acceptedAnswer']['text'] );
 	}
 
+	public static function provideEntities() {
+		return [
+			'quotes' => [ 'Is it &quot;free&quot;?', 'Is it "free"?' ],
+			'apostrophe' => [ 'It&#039;s free', "It's free" ],
+			'ampersand' => [ 'Tom &amp; Jerry', 'Tom & Jerry' ],
+			'no-break spaces' => [ "a&#160;b&nbsp;c\u{00A0}d", 'a b c d' ],
+			'Hebrew gershayim' => [ 'מה זה ת&quot;ז?', 'מה זה ת"ז?' ],
+			'escaped markup stays text' => [ '&lt;b&gt;x&lt;/b&gt;', '<b>x</b>' ],
+		];
+	}
+
+	/**
+	 * @dataProvider provideEntities
+	 */
+	public function testDecodesEntities( string $input, string $expected ) {
+		$node = FaqPageBuilder::build( 'id', 'u', [ [ 'question' => $input, 'answer' => $input ] ] );
+
+		$this->assertSame( $expected, $node['mainEntity'][0]['name'] );
+		$this->assertSame( $expected, $node['mainEntity'][0]['acceptedAnswer']['text'] );
+	}
+
 	public function testDropsItemsWithoutQuestionOrAnswer() {
 		$node = FaqPageBuilder::build( 'id', 'u', [
 			[ 'question' => 'Q', 'answer' => '' ],
