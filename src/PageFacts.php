@@ -2,8 +2,9 @@
 
 namespace MediaWiki\Extension\StructuredData;
 
+use InvalidArgumentException;
 use MediaWiki\Config\Config;
-use MediaWiki\MainConfigNames;
+use MediaWiki\Config\SiteConfiguration;
 use MediaWiki\Page\PageStore;
 use MediaWiki\Page\RedirectLookup;
 use MediaWiki\Parser\ParserOutput;
@@ -11,8 +12,12 @@ use MediaWiki\Revision\RevisionLookup;
 use MediaWiki\Title\Title;
 use MediaWiki\Utils\UrlUtils;
 use MediaWiki\WikiMap\WikiMap;
+use Psr\Log\LoggerInterface;
 use RepoGroup;
-use Wikimedia\Rdbms\IConnectionProvider;
+use Wikimedia\Rdbms\DBError;
+use Wikimedia\Rdbms\ILBFactory;
+use Wikimedia\Rdbms\ILoadBalancer;
+use Wikimedia\Rdbms\IReadableDatabase;
 
 /**
  * The facts about a page that cost a database query to find out: when it was
@@ -42,9 +47,11 @@ class PageFacts {
 		private readonly RevisionLookup $revisionLookup,
 		private readonly PageStore $pageStore,
 		private readonly RedirectLookup $redirectLookup,
-		private readonly IConnectionProvider $connectionProvider,
+		private readonly ILBFactory $dbProvider,
 		private readonly RepoGroup $repoGroup,
-		private readonly UrlUtils $urlUtils
+		private readonly UrlUtils $urlUtils,
+		private readonly SiteConfiguration $siteConfiguration,
+		private readonly LoggerInterface $logger
 	) {
 	}
 
@@ -83,15 +90,19 @@ class PageFacts {
 	 * The page a breadcrumb names for the page's content area, as
 	 * [ 'namespace' => int, 'title' => DB key ], or null.
 	 *
-	 * ArticleContentArea stores content areas by their name in one language
-	 * ($wgStructuredDataContentAreaLanguage, Hebrew on Kol-Zchut) on every
-	 * wiki. On a wiki in that language, the content area's portal is the
-	 * article of that name, or the one it redirects to. On any other wiki, it
-	 * is the article whose interlanguage link points at that portal, so that
-	 * the crumb carries the portal's name in this wiki's language (see
-	 * getPageLinkingTo()). Where neither exists, there is no crumb: a name the reader cannot see on the
-	 * page, or a link to a category page that search engines are told not to
-	 * index, does more harm than good.
+	 * ArticleContentArea stores content areas by their name on one wiki, the
+	 * source wiki ($wgStructuredDataContentAreaSourceWiki; Hebrew kz_he on
+	 * Kol-Zchut), on every wiki. On the source wiki, the content area's portal
+	 * is the article of that name, or the one it redirects to. On any other
+	 * wiki, it is the article whose interlanguage link points at that portal,
+	 * so that the crumb carries the portal's name in this wiki's language (see
+	 * getPageLinkingTo()). Where neither exists, there is no crumb: a name the
+	 * reader cannot see on the page, or a link to a category page that search
+	 * engines are told not to index, does more harm than good.
+	 *
+	 * A source wiki that $wgConf does not know, or whose database cannot be
+	 * queried, also gives no crumb, and a warning: a configuration error must
+	 * not fail the parse.
 	 */
 	private function getContentAreaPage( Title $title, ParserOutput $parserOutput ): ?array {
 		$area = $parserOutput->getPageProperty( self::CONTENT_AREA_PROPERTY );
@@ -103,12 +114,29 @@ class PageFacts {
 			return null;
 		}
 
-		$language = $this->config->get( 'StructuredDataContentAreaLanguage' )
-			?? $this->config->get( MainConfigNames::LanguageCode );
-		if ( $language === $this->config->get( MainConfigNames::LanguageCode ) ) {
+		$sourceWiki = $this->getSourceWiki();
+		if ( $sourceWiki === null ) {
 			$target = $this->getArticle( $area );
 		} else {
-			$target = $this->getPageLinkingTo( (string)$language, $area );
+			$language = $this->getSourceWikiLanguage( $sourceWiki );
+			if ( $language === null ) {
+				$this->logger->warning(
+					'Content-area source wiki {wiki} is not in $wgConf, or has no wgLanguageCode there; ' .
+						'{page} gets no content-area breadcrumb',
+					[ 'wiki' => $sourceWiki, 'page' => $title->getPrefixedText() ]
+				);
+				return null;
+			}
+			try {
+				$redirectTarget = $this->getContentAreaRedirectTarget( $sourceWiki, $area );
+			} catch ( DBError | InvalidArgumentException $e ) {
+				$this->logger->warning(
+					'Could not query content-area source wiki {wiki}; {page} gets no content-area breadcrumb',
+					[ 'wiki' => $sourceWiki, 'page' => $title->getPrefixedText(), 'exception' => $e ]
+				);
+				return null;
+			}
+			$target = $this->getPageLinkingTo( $language, $area, $redirectTarget );
 		}
 
 		if ( $target === null
@@ -117,6 +145,32 @@ class PageFacts {
 			return null;
 		}
 		return $target;
+	}
+
+	/**
+	 * The wiki ID of the content-area source wiki, or null where that is this
+	 * wiki.
+	 */
+	private function getSourceWiki(): ?string {
+		$wiki = $this->config->get( 'StructuredDataContentAreaSourceWiki' );
+		if ( !is_string( $wiki ) || $wiki === '' || WikiMap::isCurrentWikiId( $wiki ) ) {
+			return null;
+		}
+		return $wiki;
+	}
+
+	/**
+	 * The content language of another wiki in the farm, from $wgConf, or null
+	 * where $wgConf does not list the wiki or gives it no language.
+	 */
+	private function getSourceWikiLanguage( string $wiki ): ?string {
+		$conf = $this->siteConfiguration;
+		$conf->loadFullData();
+		if ( !in_array( $wiki, $conf->wikis, true ) ) {
+			return null;
+		}
+		$language = $conf->get( 'wgLanguageCode', $wiki );
+		return is_string( $language ) && $language !== '' ? $language : null;
 	}
 
 	/**
@@ -139,26 +193,24 @@ class PageFacts {
 
 	/**
 	 * The local article with an interlanguage link to the portal of the
-	 * content area $area, which is named in $language.
+	 * content area $area, which is named in $language, the source wiki's
+	 * language.
 	 *
 	 * Interlanguage links point at the portal article, so where the area's
-	 * name is a redirect on the wiki in $language (on Kol-Zchut, he:המשפט
-	 * הפלילי to he:אנשים בהליכים פליליים), the local portal links to the
-	 * redirect's target, not to the name. The name is therefore resolved
-	 * through that wiki first ($wgStructuredDataContentAreaWiki), and the
-	 * link may point at either.
+	 * name is a redirect on the source wiki (on Kol-Zchut, he:המשפט הפלילי to
+	 * he:אנשים בהליכים פליליים), the local portal links to the redirect's
+	 * target, $redirectTarget, not to the name. The link may point at either.
 	 *
 	 * Where several local articles match, the pick is deterministic: a link
 	 * to the redirect's target, which is the portal itself, wins over a link
 	 * to the area's name; among links to the same title, the article with the
 	 * lowest page ID, which is the oldest, wins.
 	 */
-	private function getPageLinkingTo( string $language, string $area ): ?array {
+	private function getPageLinkingTo( string $language, string $area, ?string $redirectTarget ): ?array {
 		// Title texts, with spaces, in order of preference
 		$names = [ str_replace( '_', ' ', $area ) ];
-		$target = $this->getContentAreaRedirectTarget( $area );
-		if ( $target !== null && $target !== $names[0] ) {
-			array_unshift( $names, $target );
+		if ( $redirectTarget !== null && $redirectTarget !== $names[0] ) {
+			array_unshift( $names, $redirectTarget );
 		}
 
 		$titles = [];
@@ -166,7 +218,7 @@ class PageFacts {
 			$titles[] = $name;
 			$titles[] = str_replace( ' ', '_', $name );
 		}
-		$rows = $this->connectionProvider->getReplicaDatabase()->newSelectQueryBuilder()
+		$rows = $this->dbProvider->getReplicaDatabase()->newSelectQueryBuilder()
 			->select( [ 'll_title', 'page_namespace', 'page_title' ] )
 			->from( 'langlinks' )
 			->join( 'page', null, 'page_id = ll_from' )
@@ -196,20 +248,16 @@ class PageFacts {
 	}
 
 	/**
-	 * Where the content area's name is a redirect on the wiki in the
-	 * content-area language, the title of its target, with spaces; else null.
+	 * Where the content area's name is a redirect on the source wiki, the
+	 * title of its target, with spaces; else null.
 	 *
-	 * This is a query on that wiki's database, and runs at parse time only.
-	 * Without $wgStructuredDataContentAreaWiki there is no such query, and
-	 * only the area's name is matched.
+	 * This is a query on the source wiki's database, and runs at parse time
+	 * only.
+	 *
+	 * @throws DBError Where the source wiki's database cannot be queried
 	 */
-	private function getContentAreaRedirectTarget( string $area ): ?string {
-		$wiki = $this->config->get( 'StructuredDataContentAreaWiki' );
-		if ( !is_string( $wiki ) || $wiki === '' ) {
-			return null;
-		}
-		$row = $this->connectionProvider
-			->getReplicaDatabase( WikiMap::isCurrentWikiId( $wiki ) ? false : $wiki )
+	private function getContentAreaRedirectTarget( string $sourceWiki, string $area ): ?string {
+		$row = $this->getSourceWikiDatabase( $sourceWiki )
 			->newSelectQueryBuilder()
 			->select( [ 'rd_namespace', 'rd_title', 'rd_interwiki' ] )
 			->from( 'page' )
@@ -229,6 +277,22 @@ class PageFacts {
 			return null;
 		}
 		return str_replace( '_', ' ', (string)$row->rd_title );
+	}
+
+	/**
+	 * A replica connection to the source wiki's database.
+	 *
+	 * It is a connection of its own, in autocommit mode, rather than the
+	 * request's shared one switched to that database: on a web request the
+	 * shared connection is inside a transaction, and a failed switch to a
+	 * database that does not exist would leave that transaction in an error
+	 * state and fail every later query of the request.
+	 *
+	 * Tests override this to stand the test database in for another wiki's.
+	 */
+	protected function getSourceWikiDatabase( string $sourceWiki ): IReadableDatabase {
+		return $this->dbProvider->getMainLB( $sourceWiki )
+			->getConnection( DB_REPLICA, [], $sourceWiki, ILoadBalancer::CONN_TRX_AUTOCOMMIT );
 	}
 
 	/**
