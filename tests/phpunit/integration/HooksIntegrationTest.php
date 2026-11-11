@@ -13,6 +13,7 @@ use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Registration\ExtensionRegistry;
 use MediaWiki\Request\FauxRequest;
 use MediaWiki\Title\Title;
+use MediaWiki\WikiMap\WikiMap;
 use MediaWikiIntegrationTestCase;
 use Skin;
 use Wikimedia\Timestamp\ConvertibleTimestamp;
@@ -50,6 +51,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 			'StructuredDataBreadcrumb' => true,
 			'StructuredDataBreadcrumbContentArea' => true,
 			'StructuredDataContentAreaLanguage' => null,
+			'StructuredDataContentAreaWiki' => null,
 			'StructuredDataArticle' => true,
 			'StructuredDataFAQ' => true,
 			'FAQElementOutputSchema' => false,
@@ -306,6 +308,78 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertCount( 3, $crumbs );
 		$this->assertSame( 'Local education portal', $crumbs[1]['name'] );
 		$this->assertSame( $portal->getCanonicalURL(), $crumbs[1]['item'] );
+	}
+
+	/**
+	 * A local article with an interlanguage link to xx:$target.
+	 */
+	private function makeLocalPortal( string $name, string $target ): Title {
+		$portal = $this->makePage( $name );
+		$this->getDb()->newInsertQueryBuilder()
+			->insertInto( 'langlinks' )
+			->row( [ 'll_from' => $portal->getArticleID(), 'll_lang' => 'xx', 'll_title' => $target ] )
+			->caller( __METHOD__ )
+			->execute();
+		return $portal;
+	}
+
+	/**
+	 * The area's name is a redirect on the wiki in its language, and this
+	 * wiki's portal links to the redirect's target. That wiki is this test's
+	 * own database, standing in for kz_he.
+	 */
+	private function makeRedirectedForeignArea( string $area, string $target ): void {
+		$this->overrideConfigValues( [
+			'StructuredDataContentAreaLanguage' => 'xx',
+			'StructuredDataContentAreaWiki' => WikiMap::getCurrentWikiId(),
+		] );
+		$this->editPage( Title::makeTitle( NS_MAIN, $area ), "#REDIRECT [[$target]]" );
+	}
+
+	public function testContentAreaRedirectOnAnotherLanguagesWikiLeadsToThePortal() {
+		$this->makeRedirectedForeignArea( 'Hub area name', 'Hub area portal' );
+		$portal = $this->makeLocalPortal( 'Local hub portal', 'Hub area portal' );
+		$title = $this->makePage( 'SD other language redirected area' );
+
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Hub area name' ] );
+
+		$this->assertCount( 3, $crumbs );
+		$this->assertSame( 'Local hub portal', $crumbs[1]['name'] );
+		$this->assertSame( $portal->getCanonicalURL(), $crumbs[1]['item'] );
+	}
+
+	public function testContentAreaRedirectIsNotResolvedWithoutTheAreasWiki() {
+		$this->makeRedirectedForeignArea( 'Unresolved area name', 'Unresolved area portal' );
+		$this->overrideConfigValue( 'StructuredDataContentAreaWiki', null );
+		$this->makeLocalPortal( 'Local unresolved portal', 'Unresolved area portal' );
+		$title = $this->makePage( 'SD unresolved redirected area' );
+
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Unresolved area name' ] );
+
+		$this->assertCount( 2, $crumbs );
+	}
+
+	public function testALinkToTheRedirectTargetWinsOverALinkToTheAreasName() {
+		$this->makeRedirectedForeignArea( 'Twice linked area', 'Twice linked portal' );
+		// The older article links to the name, the newer one to the target.
+		$this->makeLocalPortal( 'Local page linking to the name', 'Twice linked area' );
+		$portal = $this->makeLocalPortal( 'Local page linking to the target', 'Twice linked portal' );
+		$title = $this->makePage( 'SD twice linked area' );
+
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Twice linked area' ] );
+
+		$this->assertSame( $portal->getCanonicalURL(), $crumbs[1]['item'] );
+	}
+
+	public function testTheOldestOfSeveralLocalPortalsWins() {
+		$this->makeRedirectedForeignArea( 'Shared area', 'Shared portal' );
+		$oldest = $this->makeLocalPortal( 'Older local portal', 'Shared portal' );
+		$this->makeLocalPortal( 'Newer local portal', 'Shared portal' );
+		$title = $this->makePage( 'SD shared area' );
+
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Shared area' ] );
+
+		$this->assertSame( $oldest->getCanonicalURL(), $crumbs[1]['item'] );
 	}
 
 	public static function provideSkippedContentAreas() {
