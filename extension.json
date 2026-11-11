@@ -84,7 +84,7 @@
 	"Hooks": {
 		"ContentAlterParserOutput": "StructuredDataHooks",
 		"OutputPageParserOutput": "StructuredDataHooks",
-		"BeforePageDisplay": "StructuredDataHooks"
+		"OutputPageAfterGetHeadLinksArray": "StructuredDataHooks"
 	},
 	"manifest_version": 2
 }

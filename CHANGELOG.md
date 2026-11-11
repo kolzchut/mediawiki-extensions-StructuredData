@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The Article `headline` and the last breadcrumb are the page's `<h1>`, so on
+  teen's article and portal namespaces they no longer carry the namespace
+  prefix (`זכות:`, `פורטל:`) that KolzchutYoung drops from the heading. The
+  JSON-LD is now written with the `<head>`, after every `BeforePageDisplay`
+  handler, so the headline is the final `<h1>` whatever the load order
 - The ar and ru breadcrumb has its middle crumb when the content area's Hebrew
   name is a redirect to its portal: `$wgStructuredDataContentAreaWiki` names the
   Hebrew wiki, where the name is resolved to the redirect's target at parse

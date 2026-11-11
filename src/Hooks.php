@@ -20,7 +20,7 @@ use MediaWiki\Extension\StructuredData\Schema\FaqPageBuilder;
 use MediaWiki\Extension\StructuredData\Schema\OrganizationBuilder;
 use MediaWiki\Language\LanguageCode;
 use MediaWiki\MainConfigNames;
-use MediaWiki\Output\Hook\BeforePageDisplayHook;
+use MediaWiki\Output\Hook\OutputPageAfterGetHeadLinksArrayHook;
 use MediaWiki\Output\Hook\OutputPageParserOutputHook;
 use MediaWiki\Output\OutputPage;
 use MediaWiki\Parser\ParserOutput;
@@ -33,7 +33,7 @@ use MediaWiki\Utils\UrlUtils;
 class Hooks implements
 	ContentAlterParserOutputHook,
 	OutputPageParserOutputHook,
-	BeforePageDisplayHook
+	OutputPageAfterGetHeadLinksArrayHook
 {
 
 	/**
@@ -42,12 +42,13 @@ class Hooks implements
 	 */
 	public const FAQ_DATA_KEY = 'faqelement_items';
 
-	/** Key of the <head> item that holds the JSON-LD */
+	/** Key, among the <head> links, of the tag that holds the JSON-LD */
 	public const HEAD_ITEM = 'structureddata-jsonld';
 
 	/**
 	 * OutputPage property that carries the page's ParserOutput from
-	 * OutputPageParserOutput to BeforePageDisplay, which has no access to it
+	 * OutputPageParserOutput to OutputPageAfterGetHeadLinksArray, which has no
+	 * access to it
 	 */
 	private const PARSER_OUTPUT_PROPERTY = 'StructuredDataParserOutput';
 
@@ -57,7 +58,8 @@ class Hooks implements
 		private readonly TitleFactory $titleFactory,
 		private readonly UrlUtils $urlUtils,
 		private readonly LastHumanEditLookup $lastHumanEditLookup,
-		private readonly PageFacts $pageFacts
+		private readonly PageFacts $pageFacts,
+		private readonly string $entryPoint = MW_ENTRY_POINT
 	) {
 	}
 
@@ -74,9 +76,9 @@ class Hooks implements
 	}
 
 	/**
-	 * Keep the page's ParserOutput for BeforePageDisplay. It is read there, not
-	 * here, because RealLastUpdate fills in the last human edit in its own
-	 * handler of this hook, which may run after this one.
+	 * Keep the page's ParserOutput for OutputPageAfterGetHeadLinksArray. It is
+	 * read there, not here, because RealLastUpdate fills in the last human edit
+	 * in its own handler of this hook, which may run after this one.
 	 *
 	 * @inheritDoc
 	 */
@@ -89,9 +91,19 @@ class Hooks implements
 	}
 
 	/**
+	 * Add the JSON-LD to the <head> as it is being written.
+	 *
+	 * OutputPage::headElement() runs this hook when the skin writes the
+	 * <head>, which it does after the page body and after every
+	 * BeforePageDisplay handler. So the <h1> read here is the final one, whatever
+	 * the order in which extensions that change it are loaded. Only a skinned
+	 * HTML page writes a <head>, so action=raw and most of the API never run
+	 * it. The exception, action=parse with prop=headhtml, is turned away by
+	 * isEligible().
+	 *
 	 * @inheritDoc
 	 */
-	public function onBeforePageDisplay( $out, $skin ): void {
+	public function onOutputPageAfterGetHeadLinksArray( &$tags, $out ): void {
 		if ( !$this->isEligible( $out ) ) {
 			return;
 		}
@@ -101,7 +113,7 @@ class Hooks implements
 		}
 		$script = JsonLd::toScript( $this->buildNodes( $out, $out->getTitle(), $parserOutput ) );
 		if ( $script !== null ) {
-			$out->addHeadItem( self::HEAD_ITEM, $script );
+			$tags[self::HEAD_ITEM] = $script;
 		}
 	}
 
@@ -110,8 +122,17 @@ class Hooks implements
 	 * our namespaces describes that page. Special pages, redirects, old
 	 * revisions, diffs, edit/history/info and missing pages get nothing, and so
 	 * does the main page, which is the site rather than an article.
+	 *
+	 * Nor does the API. action=parse with prop=headhtml writes a <head> for an
+	 * OutputPage that it makes look like a plain view (action=view, article
+	 * flag set), but it runs no BeforePageDisplay, so the <h1> there is not
+	 * the reader's (on teen it keeps the namespace that KolzchutYoung drops).
+	 * Its request is a FauxRequest, so the entry point is what tells it apart.
 	 */
 	public function isEligible( OutputPage $out ): bool {
+		if ( $this->entryPoint === 'api' ) {
+			return false;
+		}
 		$title = $out->getTitle();
 		if ( !$title
 			|| !$title->canExist()
@@ -238,13 +259,25 @@ class Hooks implements
 	}
 
 	/**
-	 * The displayed title (DISPLAYTITLE included) as plain text, without the
-	 * " (type)" suffix that Extension:WRArticleType appends to it: that is a
-	 * label for readers, not part of the article's name.
+	 * The page's <h1> as plain text, without the " (type)" suffix that
+	 * Extension:WRArticleType appends to it: that is a label for readers, not
+	 * part of the article's name.
+	 *
+	 * The <h1> is the OutputPage's page title, not its display title. Core
+	 * sets both from the parse (DISPLAYTITLE included), but an extension may
+	 * change the <h1> alone: on the teen site, KolzchutYoung drops the
+	 * namespace prefix of its article and portal namespaces from it, while the
+	 * display title keeps the prefix. It does so in its own BeforePageDisplay
+	 * handler; this is read later, when the <head> is written, so it sees the
+	 * final <h1> whatever the load order. Without a page title, the display
+	 * title stands in.
 	 */
 	private function getHeadline( OutputPage $out, Title $title ): string {
+		$pageTitle = $out->getPageTitle();
 		$html = preg_replace(
-			'#<span class="article-type">.*?</span>#s', '', $out->getDisplayTitle()
+			'#<span class="article-type">.*?</span>#s',
+			'',
+			$pageTitle !== '' ? $pageTitle : $out->getDisplayTitle()
 		) ?? '';
 		$headline = trim( Sanitizer::stripAllTags( $html ) );
 		return $headline !== '' ? $headline : $title->getPrefixedText();

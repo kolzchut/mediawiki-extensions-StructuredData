@@ -11,9 +11,10 @@ use MediaWiki\Parser\ParserOutput;
  * RealLastUpdate looks the date up on every page view, in its own
  * OutputPageParserOutput handler, and leaves it in the page property
  * RealLastUpdateTimestamp of the ParserOutput being shown. This reads it from
- * there instead of asking the database a second time. Read it no earlier than
- * BeforePageDisplay, when every OutputPageParserOutput handler has run, so the
- * order in which the two extensions are loaded does not matter.
+ * there instead of asking the database a second time. It is read when the
+ * <head> is written (OutputPageAfterGetHeadLinksArray), after every
+ * OutputPageParserOutput handler has run, so the order in which the two
+ * extensions are loaded does not matter.
  *
  * RealLastUpdate is optional. The teen site does not load it, and there the
  * caller falls back to the revision being shown.

@@ -2,13 +2,17 @@
 
 namespace MediaWiki\Extension\StructuredData\Tests\Integration;
 
+use MediaWiki\Api\ApiMain;
 use MediaWiki\Content\WikitextContent;
 use MediaWiki\Context\RequestContext;
 use MediaWiki\Extension\StructuredData\Hooks;
 use MediaWiki\Extension\StructuredData\LastHumanEditLookup;
 use MediaWiki\Extension\StructuredData\PageFacts;
+use MediaWiki\HookContainer\HookRunner;
 use MediaWiki\Language\LanguageCode;
+use MediaWiki\MainConfigNames;
 use MediaWiki\Output\OutputPage;
+use MediaWiki\Parser\Parser;
 use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Registration\ExtensionRegistry;
 use MediaWiki\Request\FauxRequest;
@@ -66,7 +70,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		parent::tearDown();
 	}
 
-	private function newHooks( bool $realLastUpdate = false ): Hooks {
+	private function newHooks( bool $realLastUpdate = false, string $entryPoint = 'index' ): Hooks {
 		$services = $this->getServiceContainer();
 		return new Hooks(
 			$services->getMainConfig(),
@@ -82,7 +86,8 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 				$services->getConnectionProvider(),
 				$services->getRepoGroup(),
 				$services->getUrlUtils()
-			)
+			),
+			$entryPoint
 		);
 	}
 
@@ -125,7 +130,8 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	}
 
 	/**
-	 * An OutputPage as Article::view() leaves it for a plain view.
+	 * An OutputPage as Article::view() leaves it for a plain view, with the
+	 * <h1> it sets before it has the parse: the prefixed title.
 	 */
 	private function newView( Title $title, array $query = [], ?int $revId = null ): OutputPage {
 		$context = new RequestContext();
@@ -133,10 +139,35 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$context->setRequest( new FauxRequest( $query ) );
 		$context->setUser( $this->getServiceContainer()->getUserFactory()->newAnonymous() );
 		$out = $context->getOutput();
+		$out->setPageTitle( Parser::formatPageTitle(
+			str_replace( '_', ' ', $title->getNsText() ), ':', $title->getText()
+		) );
 		$out->setArticleFlag( true );
 		$out->setRevisionId( $revId ?? $title->getLatestRevID() );
 		$out->setRevisionTimestamp( self::EDITED );
 		return $out;
+	}
+
+	/**
+	 * Set the title the parse displays on both the <h1> and the display title,
+	 * as Article::adjustDisplayTitle() does (and WRArticleType after it).
+	 */
+	private static function showTitle( OutputPage $out, string $html ): void {
+		$out->setPageTitle( $html );
+		$out->setDisplayTitle( $html );
+	}
+
+	/**
+	 * A real parse of the page as stored, with the facts collected during it,
+	 * as the parser cache holds it.
+	 */
+	private function realParse( Hooks $hooks, Title $title ): ParserOutput {
+		$page = $this->getServiceContainer()->getWikiPageFactory()->newFromTitle( $title );
+		$parserOutput = $this->getServiceContainer()->getParserOutputAccess()->getParserOutput(
+			$page, $page->makeParserOptions( 'canonical' )
+		)->getValue();
+		$hooks->onContentAlterParserOutput( new WikitextContent( 'x' ), $title, $parserOutput );
+		return $parserOutput;
 	}
 
 	/**
@@ -157,14 +188,51 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		if ( $afterOwnHandler ) {
 			$afterOwnHandler( $parserOutput );
 		}
-		$hooks->onBeforePageDisplay( $out, $this->createMock( Skin::class ) );
-		$head = $out->getHeadItemsArray()[Hooks::HEAD_ITEM] ?? null;
+		$tags = [];
+		$hooks->onOutputPageAfterGetHeadLinksArray( $tags, $out );
+		return $this->decode( $tags[Hooks::HEAD_ITEM] ?? null );
+	}
+
+	private function decode( ?string $head ): ?array {
 		if ( $head === null ) {
 			return null;
 		}
 		$this->assertMatchesRegularExpression( '#^<script type="application/ld\+json">.*</script>$#s', $head );
 		$json = substr( $head, strlen( '<script type="application/ld+json">' ), -strlen( '</script>' ) );
 		return json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+	}
+
+	/**
+	 * Run the page through the hooks as OutputPage and the skin do, with this
+	 * extension registered for every hook it implements and $laterHandler as a
+	 * BeforePageDisplay handler registered after it, as for an extension loaded
+	 * later. Decode the JSON-LD from the <head> the skin writes.
+	 *
+	 * @param Hooks $hooks
+	 * @param OutputPage $out
+	 * @param ParserOutput $parserOutput
+	 * @param callable $laterHandler
+	 * @return array|null
+	 */
+	private function renderThroughHooks(
+		Hooks $hooks, OutputPage $out, ParserOutput $parserOutput, callable $laterHandler
+	): ?array {
+		foreach ( [ 'OutputPageParserOutput', 'BeforePageDisplay', 'OutputPageAfterGetHeadLinksArray' ] as $hook ) {
+			$this->clearHook( $hook );
+			if ( method_exists( $hooks, "on$hook" ) ) {
+				$this->setTemporaryHook( $hook, [ $hooks, "on$hook" ] );
+			}
+		}
+		$this->setTemporaryHook( 'BeforePageDisplay', $laterHandler, false );
+		$hookRunner = new HookRunner( $this->getServiceContainer()->getHookContainer() );
+
+		$hookRunner->onOutputPageParserOutput( $out, $parserOutput );
+		$hookRunner->onBeforePageDisplay( $out, $this->createMock( Skin::class ) );
+		// What OutputPage::headElement() writes into the <head>, wherever the
+		// JSON-LD went
+		$head = array_merge( $out->getHeadLinksArray(), $out->getHeadItemsArray() );
+
+		return $this->decode( $head[Hooks::HEAD_ITEM] ?? null );
 	}
 
 	private static function byType( array $doc ): array {
@@ -516,7 +584,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	public function testHeadlineIsTheDisplayTitleAsText() {
 		$title = $this->makePage( 'SD title' );
 		$out = $this->newView( $title );
-		$out->setDisplayTitle( '<i>Shown</i> &amp; title' );
+		self::showTitle( $out, '<i>Shown</i> &amp; title' );
 
 		$nodes = self::byType( $this->render( $this->newHooks(), $out ) );
 
@@ -528,12 +596,85 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$title = $this->makePage( 'SD typed' );
 		$out = $this->newView( $title );
 		// What WRArticleType makes of the display title
-		$out->setDisplayTitle( '<span class="mw-page-title-main">Typed</span>'
+		self::showTitle( $out, '<span class="mw-page-title-main">Typed</span>'
 			. '<span class="article-type"> (rights)</span>' );
 
 		$nodes = self::byType( $this->render( $this->newHooks(), $out ) );
 
 		$this->assertSame( 'Typed', $nodes['Article']['headline'] );
+	}
+
+	/**
+	 * A content namespace other than the main one, as teen's articles and
+	 * portals live in.
+	 */
+	private function useRightsNamespace(): int {
+		$this->overrideConfigValues( [
+			MainConfigNames::ExtraNamespaces => [ 100 => 'Right', 101 => 'Right_talk' ],
+			MainConfigNames::ContentNamespaces => [ NS_MAIN, 100 ],
+			MainConfigNames::RestrictDisplayTitle => false,
+		] );
+		return 100;
+	}
+
+	public function testHeadlineInAnotherContentNamespaceFollowsTheHeading() {
+		$title = $this->makePage( 'SD prefixed', $this->useRightsNamespace() );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		// As core leaves it, the <h1> carries the namespace, and so does the headline.
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+		$this->assertSame( 'Right:SD prefixed', $nodes['Article']['headline'] );
+
+		// Teen's KolzchutYoung drops the namespace from the <h1> alone, in its
+		// BeforePageDisplay handler.
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+		$out->setPageTitle( $title->getText() );
+
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+		$this->assertSame( 'SD prefixed', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'SD prefixed', end( $crumbs )['name'] );
+	}
+
+	public function testHeadlineIsTheFinalHeadingWhateverTheLoadOrder() {
+		$title = $this->makePage( 'SD late', $this->useRightsNamespace() );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		// An extension loaded after this one drops the namespace from the <h1>
+		// in its BeforePageDisplay handler, as KolzchutYoung does on teen.
+		$nodes = self::byType( $this->renderThroughHooks( $hooks, $out, $parserOutput,
+			static function ( OutputPage $out ) {
+				$out->setPageTitle( $out->getTitle()->getText() );
+			}
+		) );
+
+		$this->assertSame( 'SD late', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'SD late', end( $crumbs )['name'] );
+	}
+
+	public function testHeadlineIsTheDisplayTitleWhereItDiffersFromTheTitle() {
+		$title = $this->makePage( 'SD display', $this->useRightsNamespace() );
+		ConvertibleTimestamp::setFakeTime( self::EDITED );
+		$this->editPage( $title, '{{DISPLAYTITLE:Shown <i>name</i>}} Text' );
+		ConvertibleTimestamp::setFakeTime( false );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		$nodes = self::byType( $this->render( $hooks, $out, $parserOutput ) );
+
+		$this->assertSame( 'Shown name', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'Shown name', end( $crumbs )['name'] );
 	}
 
 	public function testConfiguredNamespaces() {
@@ -570,6 +711,40 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$title = $this->makePage( 'SD requests ' . md5( serialize( $query ) ) );
 
 		$this->assertNull( $this->render( $this->newHooks(), $this->newView( $title, $query ) ) );
+	}
+
+	/**
+	 * The <head> that api.php?action=parse&prop=headhtml writes for the page,
+	 * with this extension's handlers as $hooks.
+	 */
+	private function apiHeadHtml( Hooks $hooks, Title $title ): string {
+		$ownHooks = [ 'ContentAlterParserOutput', 'OutputPageParserOutput', 'OutputPageAfterGetHeadLinksArray' ];
+		foreach ( $ownHooks as $hook ) {
+			$this->setTemporaryHook( $hook, [ $hooks, "on$hook" ] );
+		}
+		$context = new RequestContext();
+		$context->setRequest( new FauxRequest( [
+			'action' => 'parse',
+			'page' => $title->getPrefixedText(),
+			'prop' => 'headhtml',
+			'formatversion' => 2,
+		] ) );
+		$context->setUser( $this->getServiceContainer()->getUserFactory()->newAnonymous() );
+		$api = new ApiMain( $context );
+		$api->execute();
+		return $api->getResult()->getResultData( [ 'parse', 'headhtml' ] );
+	}
+
+	public function testNothingForTheApi() {
+		$title = $this->makePage( 'SD api' );
+
+		// action=parse&prop=headhtml makes its OutputPage look like a plain
+		// view, so it would carry the JSON-LD from anywhere but the API.
+		$this->assertStringContainsString( '<script type="application/ld+json">',
+			$this->apiHeadHtml( $this->newHooks(), $title ), 'outside api.php' );
+
+		$this->assertStringNotContainsString( 'application/ld+json',
+			$this->apiHeadHtml( $this->newHooks( false, 'api' ), $title ), 'api.php' );
 	}
 
 	public function testNotAnArticleView() {
