@@ -76,26 +76,27 @@ The main page (named by the `mainpage-description` message in the wiki's
 language), the portal of the page's content area, and the page.
 
 [ArticleContentArea](https://github.com/kolzchut/mediawiki-extensions-ArticleContentArea)
-stores a page's content area by its name in one language on every wiki: on
-Kol-Zchut, Hebrew, so an Arabic article's area reads `תעסוקה וזכויות עובדים`.
-Set that language in `$wgStructuredDataContentAreaLanguage`. The middle crumb is
-then:
+stores a page's content area by its name on one wiki, the source wiki, on every
+wiki: on Kol-Zchut, Hebrew `kz_he`, so an Arabic article's area reads
+`תעסוקה וזכויות עובדים`. Set that wiki's ID in
+`$wgStructuredDataContentAreaSourceWiki`. The middle crumb is then:
 
-- on the wiki in that language, the article of the area's name, or the article
-  it redirects to (the area's portal, e.g. `חינוך`);
+- on the source wiki (or when the setting is `null`), the article of the area's
+  name, or the article it redirects to (the area's portal, e.g. `חינוך`);
 - on any other wiki, the article whose interlanguage link points at that
   portal, so the crumb carries the portal's name in the page's language
-  (`التشغيل وحقوق العاملين` on ar, `Образование` on ru).
+  (`التشغيل وحقوق العاملين` on ar, `Образование` on ru). The source wiki's
+  language, which the interlanguage links name, is its `wgLanguageCode` in the
+  farm configuration, `$wgConf`, which the site has to fill in for it (see
+  [Configuration](#configuration)).
 
   Interlanguage links point at the portal, so when the area's name is a
-  redirect on the wiki in that language (`המשפט הפלילי` to
-  `אנשים בהליכים פליליים`), the local portal links to the target. Set
-  `$wgStructuredDataContentAreaWiki` to that wiki's ID (`kz_he` on Kol-Zchut)
-  and the name is resolved there first, at parse time; a link to either the
-  name or the target then counts. Without it, only the name is matched and such
-  areas get no middle crumb. Where several local articles match, a link to the
-  target wins over a link to the name, and then the article with the lowest
-  page ID.
+  redirect on the source wiki (`המשפט הפלילי` to `אנשים בהליכים פליליים`), the
+  local portal links to the target. The name is therefore resolved on the
+  source wiki first, by a query on its database at parse time, and a link to
+  either the name or the target then counts. Where several local articles
+  match, a link to the target wins over a link to the name, and then the
+  article with the lowest page ID.
 
 Where there is no such article the middle crumb is left out, and the trail is
 main page › page. It never names the area in another language, and never links
@@ -189,11 +190,28 @@ That keeps it loadable on a wiki that has none of them, such as the teen site.
 | `$wgStructuredDataPublisherLogo` | `null` | URL of its logo, absolute or relative to `$wgServer`. Google wants a raster image of at least 112x112 pixels. `null` leaves the logo out. |
 | `$wgStructuredDataBreadcrumb` | `true` | Add the BreadcrumbList. |
 | `$wgStructuredDataBreadcrumbContentArea` | `true` | Include the content area's portal in the BreadcrumbList. |
-| `$wgStructuredDataContentAreaLanguage` | `null` | Language code of the content-area names ArticleContentArea stores. `null` means this wiki's content language. |
-| `$wgStructuredDataContentAreaWiki` | `null` | Wiki ID (database name) of the wiki in that language, e.g. `kz_he`, in which a content area's name is resolved to its redirect's target, at parse time. `null` matches the name only. |
+| `$wgStructuredDataContentAreaSourceWiki` | `null` | Wiki ID (database name) of the wiki whose names ArticleContentArea stores, e.g. `kz_he`. `null` means this wiki. For another wiki, `$wgConf` must list it in `wikis` and give its `wgLanguageCode` (below). |
 | `$wgStructuredDataDefaultImage` | `null` | Image URL for an Article whose page has no page image, absolute or relative to `$wgServer`. Google wants at least 50,000 pixels (width x height). |
 | `$wgStructuredDataArticle` | `true` | Add the Article and its Organization. |
 | `$wgStructuredDataFAQ` | `true` | Add the FAQPage. |
+
+### The source wiki in `$wgConf`
+
+On a wiki other than the source wiki, the source wiki's language comes from
+MediaWiki's farm configuration. For example, for a farm whose wikis are
+`kz_he`, `kz_ar` and `kz_ru`:
+
+```php
+$wgConf->wikis = [ 'kz_he', 'kz_ar', 'kz_ru' ];
+$wgConf->settings['wgLanguageCode'] = [ 'kz_he' => 'he', 'kz_ar' => 'ar', 'kz_ru' => 'ru' ];
+$wgStructuredDataContentAreaSourceWiki = 'kz_he';
+```
+
+If `$wgConf` does not list the source wiki, or gives it no `wgLanguageCode`,
+or the source wiki's database cannot be queried, pages with a content area get
+no middle crumb, and a warning goes to the `StructuredData` log channel. The
+page still parses. The query runs on a connection of its own, so a failure
+there does not touch the request's own database connection.
 
 ## Escaping
 

@@ -2,7 +2,9 @@
 
 namespace MediaWiki\Extension\StructuredData\Tests\Integration;
 
+use Closure;
 use MediaWiki\Api\ApiMain;
+use MediaWiki\Config\SiteConfiguration;
 use MediaWiki\Content\WikitextContent;
 use MediaWiki\Context\RequestContext;
 use MediaWiki\Extension\StructuredData\Hooks;
@@ -20,6 +22,9 @@ use MediaWiki\Title\Title;
 use MediaWiki\WikiMap\WikiMap;
 use MediaWikiIntegrationTestCase;
 use Skin;
+use TestLogger;
+use Wikimedia\Rdbms\DBConnectionError;
+use Wikimedia\Rdbms\IReadableDatabase;
 use Wikimedia\Timestamp\ConvertibleTimestamp;
 
 /**
@@ -45,8 +50,29 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		[ 'question' => 'Is it free?', 'answer' => 'Yes.' ],
 	];
 
+	/** The ID this test gives the content-area source wiki when it is not this wiki */
+	private const SOURCE_WIKI = 'sd_source_wiki';
+
+	/** $wgConf, as the tests give it to PageFacts */
+	private SiteConfiguration $siteConfiguration;
+
+	private TestLogger $logger;
+
+	/**
+	 * Stands in for PageFacts' connection to the source wiki's database, or
+	 * null for the real one
+	 *
+	 * @var Closure|null
+	 */
+	private ?Closure $sourceWikiDatabase = null;
+
+	/** @var string[] The wikis PageFacts asked for a connection to */
+	private array $sourceWikiConnections = [];
+
 	protected function setUp(): void {
 		parent::setUp();
+		$this->siteConfiguration = new SiteConfiguration();
+		$this->logger = new TestLogger( true );
 		$this->overrideConfigValues( [
 			'StructuredDataNamespaces' => null,
 			'StructuredDataPublisherName' => 'Kol-Zchut',
@@ -54,8 +80,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 			'StructuredDataDefaultImage' => null,
 			'StructuredDataBreadcrumb' => true,
 			'StructuredDataBreadcrumbContentArea' => true,
-			'StructuredDataContentAreaLanguage' => null,
-			'StructuredDataContentAreaWiki' => null,
+			'StructuredDataContentAreaSourceWiki' => null,
 			'StructuredDataArticle' => true,
 			'StructuredDataFAQ' => true,
 			'FAQElementOutputSchema' => false,
@@ -78,17 +103,73 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 			$services->getTitleFactory(),
 			$services->getUrlUtils(),
 			new LastHumanEditLookup( $realLastUpdate ),
-			new PageFacts(
-				$services->getMainConfig(),
-				$services->getRevisionLookup(),
-				$services->getPageStore(),
-				$services->getRedirectLookup(),
-				$services->getConnectionProvider(),
-				$services->getRepoGroup(),
-				$services->getUrlUtils()
-			),
+			$this->newPageFacts(),
 			$entryPoint
 		);
+	}
+
+	private function newPageFacts(): PageFacts {
+		$services = $this->getServiceContainer();
+		$args = [
+			$services->getMainConfig(),
+			$services->getRevisionLookup(),
+			$services->getPageStore(),
+			$services->getRedirectLookup(),
+			$services->getDBLoadBalancerFactory(),
+			$services->getRepoGroup(),
+			$services->getUrlUtils(),
+			$this->siteConfiguration,
+			$this->logger,
+		];
+		if ( !$this->sourceWikiDatabase ) {
+			return new PageFacts( ...$args );
+		}
+		$connections = &$this->sourceWikiConnections;
+		return new class( $this->sourceWikiDatabase, $connections, ...$args ) extends PageFacts {
+			/** @var string[] */
+			private array $connections;
+
+			public function __construct( private readonly Closure $database, array &$connections, ...$args ) {
+				parent::__construct( ...$args );
+				$this->connections = &$connections;
+			}
+
+			protected function getSourceWikiDatabase( string $sourceWiki ): IReadableDatabase {
+				$this->connections[] = $sourceWiki;
+				return ( $this->database )( $sourceWiki );
+			}
+		};
+	}
+
+	/**
+	 * Make the content-area source wiki another wiki, SOURCE_WIKI, in
+	 * language xx.
+	 *
+	 * @param Closure|null $database Its database, from the wiki ID; the
+	 *  test's own by default. Null for the real connection.
+	 * @param array $wikis The wikis $wgConf lists
+	 * @param array $languages $wgConf's wgLanguageCode, by wiki
+	 */
+	private function useSourceWiki(
+		?Closure $database = null,
+		array $wikis = [ self::SOURCE_WIKI ],
+		array $languages = [ self::SOURCE_WIKI => 'xx' ]
+	): void {
+		$this->overrideConfigValue( 'StructuredDataContentAreaSourceWiki', self::SOURCE_WIKI );
+		$this->siteConfiguration->wikis = array_merge( [ WikiMap::getCurrentWikiId() ], $wikis );
+		$this->siteConfiguration->settings['wgLanguageCode'] = $languages;
+		$this->sourceWikiDatabase = $database ?? fn () => $this->getDb();
+	}
+
+	/**
+	 * The messages of the warnings logged
+	 *
+	 * @return string[]
+	 */
+	private function loggedWarnings(): array {
+		return array_column( array_filter( $this->logger->getBuffer(),
+			static fn ( $entry ) => $entry[0] === 'warning'
+		), 1 );
 	}
 
 	/**
@@ -336,7 +417,24 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertSame( '2021-06-07T08:09:10Z', $nodes['Article']['dateModified'] );
 	}
 
-	public function testContentAreaPortalOnAWikiInTheAreasLanguage() {
+	public static function provideThisWikiAsTheSource() {
+		return [
+			'null' => [ false ],
+			'this wiki\'s ID' => [ true ],
+		];
+	}
+
+	/**
+	 * @dataProvider provideThisWikiAsTheSource
+	 */
+	public function testContentAreaPortalOnTheSourceWiki( bool $byId ) {
+		if ( $byId ) {
+			$this->overrideConfigValue( 'StructuredDataContentAreaSourceWiki', WikiMap::getCurrentWikiId() );
+		}
+		// The source wiki needs no $wgConf entry and no connection of its own.
+		$this->sourceWikiDatabase = function () {
+			$this->fail( 'No cross-wiki query on the source wiki' );
+		};
 		$this->makePage( 'Education' );
 		$title = $this->makePage( 'SD same language' );
 
@@ -346,9 +444,16 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertSame( 'Education', $crumbs[1]['name'] );
 		$this->assertSame( Title::makeTitle( NS_MAIN, 'Education' )->getCanonicalURL(), $crumbs[1]['item'] );
 		$this->assertSame( 3, $crumbs[2]['position'] );
+		$this->assertSame( [], $this->loggedWarnings() );
 	}
 
-	public function testContentAreaRedirectLeadsToThePortal() {
+	/**
+	 * @dataProvider provideThisWikiAsTheSource
+	 */
+	public function testContentAreaRedirectLeadsToThePortal( bool $byId ) {
+		if ( $byId ) {
+			$this->overrideConfigValue( 'StructuredDataContentAreaSourceWiki', WikiMap::getCurrentWikiId() );
+		}
 		$portal = $this->makePage( 'Real portal' );
 		$this->editPage( Title::makeTitle( NS_MAIN, 'Area by another name' ), '#REDIRECT [[Real portal]]' );
 		$title = $this->makePage( 'SD redirected area' );
@@ -362,7 +467,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 
 	public function testContentAreaPortalOnAnotherLanguagesWiki() {
 		// The area's name is in another language; this wiki's portal links to it.
-		$this->overrideConfigValue( 'StructuredDataContentAreaLanguage', 'xx' );
+		$this->useSourceWiki();
 		$portal = $this->makePage( 'Local education portal' );
 		$this->getDb()->newInsertQueryBuilder()
 			->insertInto( 'langlinks' )
@@ -392,15 +497,12 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	}
 
 	/**
-	 * The area's name is a redirect on the wiki in its language, and this
-	 * wiki's portal links to the redirect's target. That wiki is this test's
-	 * own database, standing in for kz_he.
+	 * The area's name is a redirect on the source wiki, and this wiki's
+	 * portal links to the redirect's target. This test's own database stands
+	 * in for the source wiki's (kz_he on Kol-Zchut).
 	 */
 	private function makeRedirectedForeignArea( string $area, string $target ): void {
-		$this->overrideConfigValues( [
-			'StructuredDataContentAreaLanguage' => 'xx',
-			'StructuredDataContentAreaWiki' => WikiMap::getCurrentWikiId(),
-		] );
+		$this->useSourceWiki();
 		$this->editPage( Title::makeTitle( NS_MAIN, $area ), "#REDIRECT [[$target]]" );
 	}
 
@@ -414,17 +516,101 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertCount( 3, $crumbs );
 		$this->assertSame( 'Local hub portal', $crumbs[1]['name'] );
 		$this->assertSame( $portal->getCanonicalURL(), $crumbs[1]['item'] );
+		// The redirect was looked up on the source wiki.
+		$this->assertSame( [ self::SOURCE_WIKI ], $this->sourceWikiConnections );
+		$this->assertSame( [], $this->loggedWarnings() );
 	}
 
-	public function testContentAreaRedirectIsNotResolvedWithoutTheAreasWiki() {
-		$this->makeRedirectedForeignArea( 'Unresolved area name', 'Unresolved area portal' );
-		$this->overrideConfigValue( 'StructuredDataContentAreaWiki', null );
-		$this->makeLocalPortal( 'Local unresolved portal', 'Unresolved area portal' );
-		$title = $this->makePage( 'SD unresolved redirected area' );
+	public function testTheSourceWikisLanguageComesFromWgConf() {
+		$this->useSourceWiki( null, [ self::SOURCE_WIKI ], [ self::SOURCE_WIKI => 'yy' ] );
+		$this->makeLocalPortal( 'Local xx portal', 'Language area' );
+		$yy = $this->makePage( 'Local yy portal' );
+		$this->getDb()->newInsertQueryBuilder()
+			->insertInto( 'langlinks' )
+			->row( [ 'll_from' => $yy->getArticleID(), 'll_lang' => 'yy', 'll_title' => 'Language area' ] )
+			->caller( __METHOD__ )
+			->execute();
+		$title = $this->makePage( 'SD language from wgConf' );
 
-		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Unresolved area name' ] );
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Language area' ] );
+
+		$this->assertSame( $yy->getCanonicalURL(), $crumbs[1]['item'] );
+	}
+
+	public static function provideSourceWikisUnknownToWgConf() {
+		return [
+			'not listed' => [ [], [ self::SOURCE_WIKI => 'xx' ] ],
+			'no language' => [ [ self::SOURCE_WIKI ], [] ],
+			'an empty language' => [ [ self::SOURCE_WIKI ], [ self::SOURCE_WIKI => '' ] ],
+		];
+	}
+
+	/**
+	 * @dataProvider provideSourceWikisUnknownToWgConf
+	 */
+	public function testASourceWikiUnknownToWgConfGivesNoCrumb( array $wikis, array $languages ) {
+		$this->useSourceWiki( null, $wikis, $languages );
+		// A portal that would match, were the source wiki's language known
+		$this->makeLocalPortal( 'Local portal of an unknown wiki', 'Unknown wiki area' );
+		$title = $this->makePage( 'SD unknown source wiki' );
+
+		$crumbs = $this->crumbs( $this->newHooks(), $title, [ 'ArticleContentArea' => 'Unknown wiki area' ] );
 
 		$this->assertCount( 2, $crumbs );
+		$this->assertSame( [], $this->sourceWikiConnections, 'no cross-wiki query' );
+		$this->assertCount( 1, $this->loggedWarnings() );
+		$this->assertStringContainsString( 'not in $wgConf', $this->loggedWarnings()[0] );
+	}
+
+	/**
+	 * A source wiki whose database cannot be reached: one that $wgConf lists
+	 * but the database server does not have, through the real connection, or
+	 * a server that is down.
+	 */
+	public static function provideUnreachableSourceWikis() {
+		return [
+			'no such database' => [ null ],
+			'server down' => [ static function () {
+				throw new DBConnectionError( null, 'Cannot reach the source wiki' );
+			} ],
+		];
+	}
+
+	/**
+	 * @dataProvider provideUnreachableSourceWikis
+	 */
+	public function testAnUnreachableSourceWikiGivesNoCrumb( ?Closure $database ) {
+		$this->useSourceWiki( $database, [ self::SOURCE_WIKI ] );
+		if ( !$database ) {
+			// The real connection, to a database that does not exist
+			$this->sourceWikiDatabase = null;
+		}
+		$this->makeLocalPortal( 'Local portal of an unreachable wiki', 'Unreachable wiki area' );
+		$title = $this->makePage( 'SD unreachable source wiki' );
+		$hooks = $this->newHooks();
+
+		// As on a web request, where the request's own connection is in a
+		// transaction when the page is parsed
+		$lbFactory = $this->getServiceContainer()->getDBLoadBalancerFactory();
+		$lbFactory->beginPrimaryChanges( __METHOD__ );
+		try {
+			$this->getDb()->newSelectQueryBuilder()->select( '1' )->from( 'page' )->caller( __METHOD__ )->fetchField();
+			$crumbs = $this->crumbs( $hooks, $title, [ 'ArticleContentArea' => 'Unreachable wiki area' ] );
+			// The request's own connection still works afterwards.
+			$this->assertSame( $title->getArticleID(), (int)$this->getDb()->newSelectQueryBuilder()
+				->select( 'page_id' )->from( 'page' )
+				->where( [ 'page_namespace' => NS_MAIN, 'page_title' => $title->getDBkey() ] )
+				->caller( __METHOD__ )->fetchField() );
+			$lbFactory->commitPrimaryChanges( __METHOD__ );
+		} finally {
+			if ( $lbFactory->hasTransactionRound() ) {
+				$lbFactory->rollbackPrimaryChanges( __METHOD__ );
+			}
+		}
+
+		$this->assertCount( 2, $crumbs );
+		$this->assertCount( 1, $this->loggedWarnings() );
+		$this->assertStringContainsString( 'Could not query', $this->loggedWarnings()[0] );
 	}
 
 	public function testALinkToTheRedirectTargetWinsOverALinkToTheAreasName() {
@@ -472,7 +658,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 	}
 
 	public function testNoPortalForAnotherLanguagesArea() {
-		$this->overrideConfigValue( 'StructuredDataContentAreaLanguage', 'xx' );
+		$this->useSourceWiki();
 		// An article with the area's name exists here, but it is not this wiki's portal.
 		$this->makePage( 'Foreign only area' );
 		$title = $this->makePage( 'SD no langlink' );
