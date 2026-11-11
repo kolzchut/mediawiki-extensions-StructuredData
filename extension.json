@@ -51,6 +51,10 @@
 			"description": "Language code of the content-area names that Extension:ArticleContentArea stores (on Kol-Zchut, Hebrew on every wiki). On a wiki in this language a content area's portal is the article of that name; on another wiki, the article with an interlanguage link to it. null means this wiki's content language.",
 			"value": null
 		},
+		"StructuredDataContentAreaWiki": {
+			"description": "Wiki ID (database name) of the wiki in $wgStructuredDataContentAreaLanguage, e.g. kz_he. On another wiki, a content area whose name is a redirect there is resolved to its target before matching interlanguage links, since a portal's interlanguage link points at the target. The query runs at parse time only. null skips it, and only the area's name is matched.",
+			"value": null
+		},
 		"StructuredDataDefaultImage": {
 			"description": "URL of an image for an Article whose page has no page image (Extension:PageImages), absolute or relative to $wgServer. Google wants at least 50,000 pixels (width x height). null leaves such an Article without an image.",
 			"value": null

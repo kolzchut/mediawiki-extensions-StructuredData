@@ -5,6 +5,14 @@ All notable changes to the StructuredData extension will be documented in this f
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- The ar and ru breadcrumb has its middle crumb when the content area's Hebrew
+  name is a redirect to its portal: `$wgStructuredDataContentAreaWiki` names the
+  Hebrew wiki, where the name is resolved to the redirect's target at parse
+  time, and a local portal linking to either counts
+
 ## [0.1.0] - 2026-11-11
 
 ### Added

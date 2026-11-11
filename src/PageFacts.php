@@ -10,6 +10,7 @@ use MediaWiki\Parser\ParserOutput;
 use MediaWiki\Revision\RevisionLookup;
 use MediaWiki\Title\Title;
 use MediaWiki\Utils\UrlUtils;
+use MediaWiki\WikiMap\WikiMap;
 use RepoGroup;
 use Wikimedia\Rdbms\IConnectionProvider;
 
@@ -87,8 +88,8 @@ class PageFacts {
 	 * wiki. On a wiki in that language, the content area's portal is the
 	 * article of that name, or the one it redirects to. On any other wiki, it
 	 * is the article whose interlanguage link points at that portal, so that
-	 * the crumb carries the portal's name in this wiki's language. Where
-	 * neither exists, there is no crumb: a name the reader cannot see on the
+	 * the crumb carries the portal's name in this wiki's language (see
+	 * getPageLinkingTo()). Where neither exists, there is no crumb: a name the reader cannot see on the
 	 * page, or a link to a category page that search engines are told not to
 	 * index, does more harm than good.
 	 */
@@ -137,26 +138,97 @@ class PageFacts {
 	}
 
 	/**
-	 * The local article with an interlanguage link to $language:$text.
+	 * The local article with an interlanguage link to the portal of the
+	 * content area $area, which is named in $language.
+	 *
+	 * Interlanguage links point at the portal article, so where the area's
+	 * name is a redirect on the wiki in $language (on Kol-Zchut, he:המשפט
+	 * הפלילי to he:אנשים בהליכים פליליים), the local portal links to the
+	 * redirect's target, not to the name. The name is therefore resolved
+	 * through that wiki first ($wgStructuredDataContentAreaWiki), and the
+	 * link may point at either.
+	 *
+	 * Where several local articles match, the pick is deterministic: a link
+	 * to the redirect's target, which is the portal itself, wins over a link
+	 * to the area's name; among links to the same title, the article with the
+	 * lowest page ID, which is the oldest, wins.
 	 */
-	private function getPageLinkingTo( string $language, string $text ): ?array {
-		$row = $this->connectionProvider->getReplicaDatabase()->newSelectQueryBuilder()
-			->select( [ 'page_namespace', 'page_title' ] )
+	private function getPageLinkingTo( string $language, string $area ): ?array {
+		// Title texts, with spaces, in order of preference
+		$names = [ str_replace( '_', ' ', $area ) ];
+		$target = $this->getContentAreaRedirectTarget( $area );
+		if ( $target !== null && $target !== $names[0] ) {
+			array_unshift( $names, $target );
+		}
+
+		$titles = [];
+		foreach ( $names as $name ) {
+			$titles[] = $name;
+			$titles[] = str_replace( ' ', '_', $name );
+		}
+		$rows = $this->connectionProvider->getReplicaDatabase()->newSelectQueryBuilder()
+			->select( [ 'll_title', 'page_namespace', 'page_title' ] )
 			->from( 'langlinks' )
 			->join( 'page', null, 'page_id = ll_from' )
 			->where( [
 				'll_lang' => $language,
-				'll_title' => [ $text, str_replace( ' ', '_', $text ) ],
+				'll_title' => array_values( array_unique( $titles ) ),
 				'page_namespace' => NS_MAIN,
 				'page_is_redirect' => 0,
 			] )
 			->orderBy( 'll_from' )
-			->limit( 1 )
+			->caller( __METHOD__ )
+			->fetchResultSet();
+
+		$best = null;
+		$bestRank = PHP_INT_MAX;
+		foreach ( $rows as $row ) {
+			$rank = array_search( str_replace( '_', ' ', (string)$row->ll_title ), $names, true );
+			// Rows come lowest page ID first, so the first row of a rank wins it.
+			if ( $rank !== false && $rank < $bestRank ) {
+				$best = $row;
+				$bestRank = $rank;
+			}
+		}
+		return $best
+			? [ 'namespace' => (int)$best->page_namespace, 'title' => (string)$best->page_title ]
+			: null;
+	}
+
+	/**
+	 * Where the content area's name is a redirect on the wiki in the
+	 * content-area language, the title of its target, with spaces; else null.
+	 *
+	 * This is a query on that wiki's database, and runs at parse time only.
+	 * Without $wgStructuredDataContentAreaWiki there is no such query, and
+	 * only the area's name is matched.
+	 */
+	private function getContentAreaRedirectTarget( string $area ): ?string {
+		$wiki = $this->config->get( 'StructuredDataContentAreaWiki' );
+		if ( !is_string( $wiki ) || $wiki === '' ) {
+			return null;
+		}
+		$row = $this->connectionProvider
+			->getReplicaDatabase( WikiMap::isCurrentWikiId( $wiki ) ? false : $wiki )
+			->newSelectQueryBuilder()
+			->select( [ 'rd_namespace', 'rd_title', 'rd_interwiki' ] )
+			->from( 'page' )
+			->join( 'redirect', null, 'rd_from = page_id' )
+			->where( [
+				'page_namespace' => NS_MAIN,
+				'page_title' => str_replace( ' ', '_', $area ),
+				'page_is_redirect' => 1,
+			] )
 			->caller( __METHOD__ )
 			->fetchRow();
-		return $row
-			? [ 'namespace' => (int)$row->page_namespace, 'title' => (string)$row->page_title ]
-			: null;
+		if ( !$row
+			|| (int)$row->rd_namespace !== NS_MAIN
+			|| (string)$row->rd_interwiki !== ''
+			|| (string)$row->rd_title === ''
+		) {
+			return null;
+		}
+		return str_replace( '_', ' ', (string)$row->rd_title );
 	}
 
 	/**

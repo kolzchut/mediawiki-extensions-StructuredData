@@ -87,6 +87,16 @@ then:
   portal, so the crumb carries the portal's name in the page's language
   (`التشغيل وحقوق العاملين` on ar, `Образование` on ru).
 
+  Interlanguage links point at the portal, so when the area's name is a
+  redirect on the wiki in that language (`המשפט הפלילי` to
+  `אנשים בהליכים פליליים`), the local portal links to the target. Set
+  `$wgStructuredDataContentAreaWiki` to that wiki's ID (`kz_he` on Kol-Zchut)
+  and the name is resolved there first, at parse time; a link to either the
+  name or the target then counts. Without it, only the name is matched and such
+  areas get no middle crumb. Where several local articles match, a link to the
+  target wins over a link to the name, and then the article with the lowest
+  page ID.
+
 Where there is no such article the middle crumb is left out, and the trail is
 main page › page. It never names the area in another language, and never links
 to the category of that name, which is `noindex,nofollow`.
@@ -174,6 +184,7 @@ That keeps it loadable on a wiki that has none of them, such as the teen site.
 | `$wgStructuredDataBreadcrumb` | `true` | Add the BreadcrumbList. |
 | `$wgStructuredDataBreadcrumbContentArea` | `true` | Include the content area's portal in the BreadcrumbList. |
 | `$wgStructuredDataContentAreaLanguage` | `null` | Language code of the content-area names ArticleContentArea stores. `null` means this wiki's content language. |
+| `$wgStructuredDataContentAreaWiki` | `null` | Wiki ID (database name) of the wiki in that language, e.g. `kz_he`, in which a content area's name is resolved to its redirect's target, at parse time. `null` matches the name only. |
 | `$wgStructuredDataDefaultImage` | `null` | Image URL for an Article whose page has no page image, absolute or relative to `$wgServer`. Google wants at least 50,000 pixels (width x height). |
 | `$wgStructuredDataArticle` | `true` | Add the Article and its Organization. |
 | `$wgStructuredDataFAQ` | `true` | Add the FAQPage. |
