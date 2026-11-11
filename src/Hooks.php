@@ -20,7 +20,7 @@ use MediaWiki\Extension\StructuredData\Schema\FaqPageBuilder;
 use MediaWiki\Extension\StructuredData\Schema\OrganizationBuilder;
 use MediaWiki\Language\LanguageCode;
 use MediaWiki\MainConfigNames;
-use MediaWiki\Output\Hook\BeforePageDisplayHook;
+use MediaWiki\Output\Hook\OutputPageAfterGetHeadLinksArrayHook;
 use MediaWiki\Output\Hook\OutputPageParserOutputHook;
 use MediaWiki\Output\OutputPage;
 use MediaWiki\Parser\ParserOutput;
@@ -33,7 +33,7 @@ use MediaWiki\Utils\UrlUtils;
 class Hooks implements
 	ContentAlterParserOutputHook,
 	OutputPageParserOutputHook,
-	BeforePageDisplayHook
+	OutputPageAfterGetHeadLinksArrayHook
 {
 
 	/**
@@ -42,12 +42,13 @@ class Hooks implements
 	 */
 	public const FAQ_DATA_KEY = 'faqelement_items';
 
-	/** Key of the <head> item that holds the JSON-LD */
+	/** Key, among the <head> links, of the tag that holds the JSON-LD */
 	public const HEAD_ITEM = 'structureddata-jsonld';
 
 	/**
 	 * OutputPage property that carries the page's ParserOutput from
-	 * OutputPageParserOutput to BeforePageDisplay, which has no access to it
+	 * OutputPageParserOutput to OutputPageAfterGetHeadLinksArray, which has no
+	 * access to it
 	 */
 	private const PARSER_OUTPUT_PROPERTY = 'StructuredDataParserOutput';
 
@@ -74,9 +75,9 @@ class Hooks implements
 	}
 
 	/**
-	 * Keep the page's ParserOutput for BeforePageDisplay. It is read there, not
-	 * here, because RealLastUpdate fills in the last human edit in its own
-	 * handler of this hook, which may run after this one.
+	 * Keep the page's ParserOutput for OutputPageAfterGetHeadLinksArray. It is
+	 * read there, not here, because RealLastUpdate fills in the last human edit
+	 * in its own handler of this hook, which may run after this one.
 	 *
 	 * @inheritDoc
 	 */
@@ -89,9 +90,18 @@ class Hooks implements
 	}
 
 	/**
+	 * Add the JSON-LD to the <head> as it is being written.
+	 *
+	 * OutputPage::headElement() runs this hook when the skin writes the
+	 * <head>, which it does after the page body and after every
+	 * BeforePageDisplay handler. So the <h1> read here is the final one, whatever
+	 * the order in which extensions that change it are loaded. Only a skinned
+	 * HTML page writes a <head>: the API (but for action=parse's headhtml,
+	 * which isEligible() turns away), action=raw and other outputs never run it.
+	 *
 	 * @inheritDoc
 	 */
-	public function onBeforePageDisplay( $out, $skin ): void {
+	public function onOutputPageAfterGetHeadLinksArray( &$tags, $out ): void {
 		if ( !$this->isEligible( $out ) ) {
 			return;
 		}
@@ -101,7 +111,7 @@ class Hooks implements
 		}
 		$script = JsonLd::toScript( $this->buildNodes( $out, $out->getTitle(), $parserOutput ) );
 		if ( $script !== null ) {
-			$out->addHeadItem( self::HEAD_ITEM, $script );
+			$tags[self::HEAD_ITEM] = $script;
 		}
 	}
 
@@ -247,8 +257,9 @@ class Hooks implements
 	 * change the <h1> alone: on the teen site, KolzchutYoung drops the
 	 * namespace prefix of its article and portal namespaces from it, while the
 	 * display title keeps the prefix. It does so in its own BeforePageDisplay
-	 * handler, so this extension must be loaded after KolzchutYoung to see it.
-	 * Without a page title, the display title stands in.
+	 * handler; this is read later, when the <head> is written, so it sees the
+	 * final <h1> whatever the load order. Without a page title, the display
+	 * title stands in.
 	 */
 	private function getHeadline( OutputPage $out, Title $title ): string {
 		$pageTitle = $out->getPageTitle();

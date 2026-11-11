@@ -105,10 +105,11 @@ to the category of that name, which is `noindex,nofollow`.
 
 - `headline`: the page's `<h1>` as plain text (a `{{DISPLAYTITLE}}` included),
   without the " (type)" suffix that WRArticleType adds to it. The last crumb of
-  the BreadcrumbList carries the same name. Where an extension changes the
-  `<h1>` in its own `BeforePageDisplay` handler, as KolzchutYoung drops the
-  namespace prefix from teen's articles and portals, the headline follows only
-  if StructuredData is loaded after that extension.
+  the BreadcrumbList carries the same name. It is the final `<h1>`, whatever
+  the load order: the JSON-LD is written with the `<head>`, after every
+  `BeforePageDisplay` handler, so where an extension changes the `<h1>` there
+  (as KolzchutYoung drops the namespace prefix from teen's articles and
+  portals), the headline follows.
 - `datePublished`: the page's first revision.
 - `dateModified`: the last edit by a human, as
   [RealLastUpdate](https://github.com/kolzchut/mediawiki-extensions-RealLastUpdate)
@@ -155,9 +156,10 @@ change that re-parses the page collects them again.
 The last human edit is not queried either. RealLastUpdate already looks it up
 on every view, in its own `OutputPageParserOutput` handler, and leaves it in
 the ParserOutput's `RealLastUpdateTimestamp` page property. This extension
-reads that property in `BeforePageDisplay`, after every
-`OutputPageParserOutput` handler has run, so the order in which the two
-extensions are loaded does not matter.
+reads that property when the `<head>` is written
+(`OutputPageAfterGetHeadLinksArray`), after every `OutputPageParserOutput`
+handler has run, so the order in which the two extensions are loaded does not
+matter.
 
 A page that was parsed before this extension was loaded has none of these
 facts and gets no JSON-LD until it is next parsed; no query fills the gap. The

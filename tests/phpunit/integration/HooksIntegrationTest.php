@@ -7,6 +7,7 @@ use MediaWiki\Context\RequestContext;
 use MediaWiki\Extension\StructuredData\Hooks;
 use MediaWiki\Extension\StructuredData\LastHumanEditLookup;
 use MediaWiki\Extension\StructuredData\PageFacts;
+use MediaWiki\HookContainer\HookRunner;
 use MediaWiki\Language\LanguageCode;
 use MediaWiki\MainConfigNames;
 use MediaWiki\Output\OutputPage;
@@ -185,14 +186,51 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		if ( $afterOwnHandler ) {
 			$afterOwnHandler( $parserOutput );
 		}
-		$hooks->onBeforePageDisplay( $out, $this->createMock( Skin::class ) );
-		$head = $out->getHeadItemsArray()[Hooks::HEAD_ITEM] ?? null;
+		$tags = [];
+		$hooks->onOutputPageAfterGetHeadLinksArray( $tags, $out );
+		return $this->decode( $tags[Hooks::HEAD_ITEM] ?? null );
+	}
+
+	private function decode( ?string $head ): ?array {
 		if ( $head === null ) {
 			return null;
 		}
 		$this->assertMatchesRegularExpression( '#^<script type="application/ld\+json">.*</script>$#s', $head );
 		$json = substr( $head, strlen( '<script type="application/ld+json">' ), -strlen( '</script>' ) );
 		return json_decode( $json, true, 512, JSON_THROW_ON_ERROR );
+	}
+
+	/**
+	 * Run the page through the hooks as OutputPage and the skin do, with this
+	 * extension registered for every hook it implements and $laterHandler as a
+	 * BeforePageDisplay handler registered after it, as for an extension loaded
+	 * later. Decode the JSON-LD from the <head> the skin writes.
+	 *
+	 * @param Hooks $hooks
+	 * @param OutputPage $out
+	 * @param ParserOutput $parserOutput
+	 * @param callable $laterHandler
+	 * @return array|null
+	 */
+	private function renderThroughHooks(
+		Hooks $hooks, OutputPage $out, ParserOutput $parserOutput, callable $laterHandler
+	): ?array {
+		foreach ( [ 'OutputPageParserOutput', 'BeforePageDisplay', 'OutputPageAfterGetHeadLinksArray' ] as $hook ) {
+			$this->clearHook( $hook );
+			if ( method_exists( $hooks, "on$hook" ) ) {
+				$this->setTemporaryHook( $hook, [ $hooks, "on$hook" ] );
+			}
+		}
+		$this->setTemporaryHook( 'BeforePageDisplay', $laterHandler, false );
+		$hookRunner = new HookRunner( $this->getServiceContainer()->getHookContainer() );
+
+		$hookRunner->onOutputPageParserOutput( $out, $parserOutput );
+		$hookRunner->onBeforePageDisplay( $out, $this->createMock( Skin::class ) );
+		// What OutputPage::headElement() writes into the <head>, wherever the
+		// JSON-LD went
+		$head = array_merge( $out->getHeadLinksArray(), $out->getHeadItemsArray() );
+
+		return $this->decode( $head[Hooks::HEAD_ITEM] ?? null );
 	}
 
 	private static function byType( array $doc ): array {
@@ -589,7 +627,7 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertSame( 'Right:SD prefixed', $nodes['Article']['headline'] );
 
 		// Teen's KolzchutYoung drops the namespace from the <h1> alone, in its
-		// BeforePageDisplay handler, which runs before this extension's.
+		// BeforePageDisplay handler.
 		$out = $this->newView( $title );
 		self::showTitle( $out, $parserOutput->getTitleText() );
 		$out->setPageTitle( $title->getText() );
@@ -598,6 +636,26 @@ class HooksIntegrationTest extends MediaWikiIntegrationTestCase {
 		$this->assertSame( 'SD prefixed', $nodes['Article']['headline'] );
 		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
 		$this->assertSame( 'SD prefixed', end( $crumbs )['name'] );
+	}
+
+	public function testHeadlineIsTheFinalHeadingWhateverTheLoadOrder() {
+		$title = $this->makePage( 'SD late', $this->useRightsNamespace() );
+		$hooks = $this->newHooks();
+		$parserOutput = $this->realParse( $hooks, $title );
+		$out = $this->newView( $title );
+		self::showTitle( $out, $parserOutput->getTitleText() );
+
+		// An extension loaded after this one drops the namespace from the <h1>
+		// in its BeforePageDisplay handler, as KolzchutYoung does on teen.
+		$nodes = self::byType( $this->renderThroughHooks( $hooks, $out, $parserOutput,
+			static function ( OutputPage $out ) {
+				$out->setPageTitle( $out->getTitle()->getText() );
+			}
+		) );
+
+		$this->assertSame( 'SD late', $nodes['Article']['headline'] );
+		$crumbs = $nodes['BreadcrumbList']['itemListElement'];
+		$this->assertSame( 'SD late', end( $crumbs )['name'] );
 	}
 
 	public function testHeadlineIsTheDisplayTitleWhereItDiffersFromTheTitle() {
